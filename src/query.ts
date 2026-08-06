@@ -250,6 +250,7 @@ async function* queryLoop(
   Terminal
 > {
   // Immutable params — never reassigned during the query loop.
+  // 以下这些参数在循环过程中不会修改，不可变参数
   const {
     systemPrompt,
     userContext,
@@ -265,6 +266,13 @@ async function* queryLoop(
   // Mutable cross-iteration state. The loop body destructures this at the top
   // of each iteration so reads stay bare-name (`messages`, `toolUseContext`).
   // Continue sites write `state = { ... }` instead of 9 separate assignments.
+  // State中的内容是循环过程中可能会被修改的参数
+  // 比如messages表示消息列表，在循环过程中肯定会不断添加新的消息，初始值为params.messages，核心包含了当前会话历史消息+本轮新消息
+  // 一个新会话里面，params.messages中一般会包含一个UserMessage和AttachmentMessage，UserMessage就是你提的问题或需求，AttachmentMessage表示附件，可以是@选中的文件，也可以是IDE里面选中的某些代码
+  // 比如toolUseContext表示工具执行上下文，在循环过程中需要利用它来执行工具，初始值为params.toolUseContext，核心包含了当前可用的工具列表
+  // toolUseContext中有一个属性是options，options里有三个属性：一个commands，一个tools，一个mcpClient，type="prompt"的command就是skill
+
+  // params里除开有messages和toolUseContext之外，还有一个systemPrompt，还有一个querySource = "repl_main_thread"
   let state: State = {
     messages: params.messages,
     toolUseContext: params.toolUseContext,
@@ -277,6 +285,8 @@ async function* queryLoop(
     pendingToolUseSummary: undefined,
     transition: undefined,
   }
+
+
   const budgetTracker = feature('TOKEN_BUDGET') ? createBudgetTracker() : null
 
   // task_budget.remaining tracking across compaction boundaries. Undefined
@@ -1712,6 +1722,9 @@ async function* queryLoop(
     }
 
     queryCheckpoint('query_recursive_call')
+
+    // 构造新的State给下一次循环使用
+    // 消息列表拼上新的assistantMessage和toolResults
     const next: State = {
       messages: [...messagesForQuery, ...assistantMessages, ...toolResults],
       toolUseContext: toolUseContextWithQueryTracking,

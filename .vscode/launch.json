@@ -1,0 +1,38 @@
+{
+  // VSCode 调试配置：直接调试 src/ 源码（需已安装 Bun 插件 oven.bun-vscode）
+  // 首次使用或 src 导入关系变化后，先跑任务 "devkit: 重新生成 debug stubs"
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // 直接启动调试。断点打在 src/**.ts(x) 上即可。
+      // 进程跑完 args 就退出（如 --help 打印完即结束，属正常）。
+      // 想调完整问答流程可改 args 为 ["-p", "你好"] 之类。
+      // 注意：不要往 runtimeArgs 里加 --inspect-wait，Bun 插件 launch 模式
+      // 会通过 BUN_INSPECT 环境变量自己管理 inspector，两者冲突会导致会话立即终止。
+      // 交互 TUI 需要真实终端：用下面的 Attach 配置。
+      "type": "bun",
+      "request": "launch",
+      "name": "调试源码 CLI (Bun)",
+      "program": "${workspaceFolder}/src/entrypoints/cli.tsx",
+      "args": ["--help"],
+      "cwd": "${workspaceFolder}",
+      "runtime": "bun",
+      "runtimeArgs": ["--preload", "${workspaceFolder}/devkit/debug-preload.ts"],
+      "env": {
+        "TERM": "xterm-256color"
+      },
+      "stopOnEntry": false,
+      "watchMode": false
+    },
+    {
+      // 交互式调试：先在集成终端里运行（注意要用 =ws://... 显式指定地址，
+      // 否则 Bun 会生成随机 token 路径，每次都得把终端打印的完整 URL 粘到下面 url 里）
+      //   bun --inspect-wait=ws://localhost:6499/ --preload ./devkit/debug-preload.ts src/entrypoints/cli.tsx
+      // 程序会暂停等待调试器，然后 F5 选择本配置附加。
+      "type": "bun",
+      "request": "attach",
+      "name": "附加到 Bun (--inspect-wait)",
+      "url": "ws://localhost:6499/"
+    }
+  ]
+}

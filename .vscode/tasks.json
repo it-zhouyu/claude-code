@@ -1,0 +1,19 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "devkit: 重新生成 debug stubs",
+      "type": "shell",
+      "command": "bun devkit/debug-stubs.ts",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "devkit: 清理 debug stubs",
+      "type": "shell",
+      "command": "bun devkit/debug-stubs.ts --clean",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}
