@@ -14,7 +14,7 @@
       "request": "launch",
       "name": "调试源码 CLI (Bun)",
       "program": "${workspaceFolder}/src/entrypoints/cli.tsx",
-      "args": ["--help"],
+      "args": ["你好"],
       "cwd": "${workspaceFolder}",
       "runtime": "bun",
       "runtimeArgs": ["--preload", "${workspaceFolder}/devkit/debug-preload.ts"],

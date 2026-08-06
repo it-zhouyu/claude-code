@@ -455,7 +455,8 @@ async function* queryLoop(
       )
       messagesForQuery = collapseResult.messages
     }
-
+    // systemContext其实也是一段提示词，比如"This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n\nCurrent branch: main\n\nMain branch (you will usually use this for PRs): main\n\nGit user: IT周瑜\n\nStatus:\nM  .vscode/launch.json\nM  devkit/debug-preload.ts\nA  devkit/debug-tui.sh\nM  \"\\345\\246\\202\\344\\275\\225\\350\\260\\203\\350\\257\\225\\346\\272\\220\\347\\240\\201.md\"\n\nRecent commits:\nb47ed01 feat: support debugging leaked source directly in VSCode\n6a3b858 feat: add build toolchain to make the leaked source runnable\na371abb fix(README): formatting in README.md for QueryEngine.ts\nd46bd99 docs(README): updated docs"
+    // fullSystemPrompt就是把systemPrompt和systemContext拼起来
     const fullSystemPrompt = asSystemPrompt(
       appendSystemContext(systemPrompt, systemContext),
     )
@@ -567,6 +568,9 @@ async function* queryLoop(
     const toolUseBlocks: ToolUseBlock[] = []
     let needsFollowUp = false
 
+    // StreamingToolExecutor的作用是：当需要执行多个工具时，大模型会先返回第一个工具，那么StreamingToolExecutor就会直接执行第一个工具，在执行第一个工具的过程中，大模型会继续返回第二个工具。
+    // 与runTools的区别是：runTools是等所有工具都返回之后，再串行执行每个工具，StreamingToolExecutor能提高效率
+    // 注意：只读工具才能并行，写工具不能并行，
     queryCheckpoint('query_setup_start')
     const useStreamingToolExecution = config.gates.streamingToolExecution
     let streamingToolExecutor = useStreamingToolExecution
@@ -576,9 +580,13 @@ async function* queryLoop(
           toolUseContext,
         )
       : null
-
+    
+    // AppState描述的是当前Claude Code的状态，比如settings配置、有哪些后台任务、permissionMode等
     const appState = toolUseContext.getAppState()
     const permissionMode = appState.toolPermissionContext.mode
+
+    // plan模式下不用ANTHROPIC_DEFAULT_HAIKU_MODEL，haiku太弱了，做不了规划，改成用ANTHROPIC_DEFAULT_SONNET_MODEL
+    // 其他情况用mainLoopModel，也就是ANTHROPIC_MODEL
     let currentModel = getRuntimeMainLoopModel({
       permissionMode,
       mainLoopModel: toolUseContext.options.mainLoopModel,
@@ -635,6 +643,8 @@ async function* queryLoop(
     // it predates the experiment and is already the control-arm baseline.
     const mediaRecoveryEnabled =
       reactiveCompact?.isReactiveCompactEnabled() ?? false
+    
+    // 如果没有压缩成功，再次检查是不是达到了限制，如果是则发送'Prompt is too long'并return
     if (
       !compactionResult &&
       querySource !== 'compact' &&
@@ -754,6 +764,7 @@ async function* queryLoop(
             // fields. The original `message` is left untouched for
             // assistantMessages.push below — it flows back to the API and
             // mutating it would break prompt caching (byte mismatch).
+            // 这里接收到的AssistantMessage已经是底层拼接并转换好的对象了
             let yieldMessage: typeof message = message
             if (message.type === 'assistant') {
               let clonedContent: typeof message.message.content | undefined
@@ -768,6 +779,9 @@ async function* queryLoop(
                     toolUseContext.options.tools,
                     block.name,
                   )
+
+                  // 回补入参值，比如将相对路径补成绝对路径，因为权限白名单是按绝对路径来匹配的
+                  // 并不是所有工具都有回补机制，一般只有文件类工具有，比如FileReadTool.ts
                   if (tool?.backfillObservableInput) {
                     const originalInput = block.input as Record<string, unknown>
                     const inputCopy = { ...originalInput }
@@ -830,15 +844,28 @@ async function* queryLoop(
             if (isWithheldMaxOutputTokens(message)) {
               withheld = true
             }
+
+            // 思考过程的流式数据会在这里返回给客户端
             if (!withheld) {
               yield yieldMessage
             }
-            if (message.type === 'assistant') {
-              assistantMessages.push(message)
 
+            if (message.type === 'assistant') {
+
+              // 一条UserMessages，可能会得到多个assistantMessage
+              // 思考过程也是一个assistantMessage
+              // tool_use也是一个assistantMessage
+              // 下一次调用大模型API时，需要进行处理，不然API会报错，因为一个UserMessage只能对应一个AssitantMessage
+              // callModel -> queryModel -> normalizeMessagesForAPI()函数会负责进行处理
+              // 比如把thinking和tool_use合并为一条assistantMessage，然后再发送给模型
+              assistantMessages.push(message)
+              
+              // 将tool_use过滤出来转成ToolUseBlock
               const msgToolUseBlocks = message.message.content.filter(
                 content => content.type === 'tool_use',
               ) as ToolUseBlock[]
+              
+              // 有tool_use，那就肯定要进行下一轮循环了，因为要把tool_result发送给大模型，所以needsFollowUp = true
               if (msgToolUseBlocks.length > 0) {
                 toolUseBlocks.push(...msgToolUseBlocks)
                 needsFollowUp = true
@@ -1069,7 +1096,11 @@ async function* queryLoop(
       }
     }
 
+    // 只有当有tool_use时，needsFollowUp才为true
+    // 如果不需要执行工具
     if (!needsFollowUp) {
+
+      // 取大模型的最后一条响应信息
       const lastMessage = assistantMessages.at(-1)
 
       // Prompt-too-long recovery: the streaming loop withheld the error
@@ -1081,6 +1112,8 @@ async function* queryLoop(
         lastMessage?.type === 'assistant' &&
         lastMessage.isApiErrorMessage &&
         isPromptTooLongMessage(lastMessage)
+      
+      
       // Media-size rejections (image/PDF/many-image) are recoverable via
       // reactive compact's strip-retry. Unlike PTL, media errors skip the
       // collapse drain — collapse doesn't strip images. mediaRecoveryEnabled
@@ -1092,6 +1125,8 @@ async function* queryLoop(
       const isWithheldMedia =
         mediaRecoveryEnabled &&
         reactiveCompact?.isWithheldMediaSizeError(lastMessage)
+      
+      // 如果是413提示词太长，尝试用折叠压缩，缩小消息列表，然后continue
       if (isWithheld413) {
         // First: drain all staged context-collapses. Gated on the PREVIOUS
         // transition not being collapse_drain_retry — if we already drained
@@ -1126,6 +1161,10 @@ async function* queryLoop(
           }
         }
       }
+
+      // 如果是提示词太长，或者图片太大，那么可以用响应式压缩
+      // 折叠压缩只能压缩文字，所以只能处理413，不能处理文字
+      // 而响应式压缩除开可以压缩文字，还会把图片删掉，用[image]纯文字占位符替换掉
       if ((isWithheld413 || isWithheldMedia) && reactiveCompact) {
         const compacted = await reactiveCompact.tryReactiveCompact({
           hasAttempted: hasAttemptedReactiveCompact,
@@ -1141,6 +1180,7 @@ async function* queryLoop(
           },
         })
 
+        // 响应式压缩是否成功，如果成功了，就将压缩后的消息列表替换到State，然后continue
         if (compacted) {
           // task_budget: same carryover as the proactive path above.
           // messagesForQuery still holds the pre-compact array here (the
@@ -1175,6 +1215,7 @@ async function* queryLoop(
           continue
         }
 
+        // 如果响应式压缩么有成功，那就只能return了，并且给出原因
         // No recovery — surface the withheld error and exit. Do NOT fall
         // through to stop hooks: the model never produced a valid response,
         // so hooks have nothing meaningful to evaluate. Running stop hooks
@@ -1192,6 +1233,8 @@ async function* queryLoop(
         return { reason: 'prompt_too_long' }
       }
 
+      // 模型输出太长了，达到了设置的max_output_tokens，注意不是提示词太长，是答案太长超过max_output_tokens了，不代表上下文满了，实际是可以继续输出的，只是达到了max_output_tokens而已
+      // max_output_tokens默认只有CAPPED_DEFAULT_MAX_TOKENS，8K（前提是capEnabled打开了，如果没有打开，默认glm-5.2是32k）
       // Check for max_output_tokens and inject recovery message. The error
       // was withheld from the stream above; only surface it if recovery
       // exhausts.
@@ -1206,6 +1249,8 @@ async function* queryLoop(
           'tengu_otk_slot_v1',
           false,
         )
+
+        // 第一种解决办法：调大max_output_tokens，调为ESCALATED_MAX_TOKENS，也就是64K，然后continue，让模型再生成一次
         if (
           capEnabled &&
           maxOutputTokensOverride === undefined &&
@@ -1230,6 +1275,9 @@ async function* queryLoop(
           continue
         }
 
+        // 第二种解决办法：不调max_output_tokens，而是让大模型接着写，接着写默认也只能输出8k
+        // 通过在消息列表中增加一个recoveryMessage，然后continue，让大模型接着写
+        // 这种方法最多执行三次
         if (maxOutputTokensRecoveryCount < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT) {
           const recoveryMessage = createUserMessage({
             content:
@@ -1261,10 +1309,12 @@ async function* queryLoop(
           continue
         }
 
+        // 上面两种方法都不能用，就只能抛错给客户端了
         // Recovery exhausted — surface the withheld error now.
         yield lastMessage
       }
 
+      // 上面3中错误Claude Code都会进行恢复重试，如果是其他错误，那就不会重试了，而是直接return了
       // Skip stop hooks when the last message is an API error (rate limit,
       // prompt-too-long, auth failure, etc.). The model never produced a
       // real response — hooks evaluating it create a death spiral:
@@ -1274,6 +1324,7 @@ async function* queryLoop(
         return { reason: 'completed' }
       }
 
+      // 调用stopHooks得到返回结果
       const stopHookResult = yield* handleStopHooks(
         messagesForQuery,
         assistantMessages,
@@ -1285,10 +1336,12 @@ async function* queryLoop(
         stopHookActive,
       )
 
+      // stopHook阻止继续，那就直接return
       if (stopHookResult.preventContinuation) {
         return { reason: 'stop_hook_prevented' }
       }
 
+      // stopHookResult中包含了blockingErrors，那就将blockingErrors添加到消息列表，然后continue
       if (stopHookResult.blockingErrors.length > 0) {
         const next: State = {
           messages: [
@@ -1315,6 +1368,8 @@ async function* queryLoop(
         continue
       }
 
+      // 如果stopHook正常返回，那继续执行下面逻辑，原则上来说stopHook就是在一次对话快结束时调用的
+
       if (feature('TOKEN_BUDGET')) {
         const decision = checkTokenBudget(
           budgetTracker!,
@@ -1323,6 +1378,7 @@ async function* queryLoop(
           getTurnOutputTokens(),
         )
 
+        // 预算没花完，接着花，接着生成
         if (decision.action === 'continue') {
           incrementBudgetContinuationCount()
           logForDebugging(
@@ -1387,6 +1443,7 @@ async function* queryLoop(
       })
     }
 
+    // streamingToolExecutor不可用就用runTools来执行工具
     const toolUpdates = streamingToolExecutor
       ? streamingToolExecutor.getRemainingResults()
       : runTools(toolUseBlocks, assistantMessages, canUseTool, toolUseContext)
