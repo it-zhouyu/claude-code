@@ -14,6 +14,30 @@ import { plugin } from 'bun'
 }
 process.env.USER_TYPE ??= 'external'
 
+// ---- 应用 ~/.claude/settings.json 的 env 块 ----
+// 官方 Claude Code 会把 settings.json 里 env 块的变量注入进程；但源码调试时
+// 该文件常因 schema 校验失败被整体跳过，这条机制失效。这里手动补上，
+// 使 launch/attach 两个调试流程都免登录（如智谱的 ANTHROPIC_BASE_URL 等）。
+// 优先级：settings.json 的值覆盖已有环境变量（与官方行为一致）。
+try {
+  const { readFileSync } = require('node:fs')
+  const { join } = require('node:path')
+  const settingsPath = join(
+    process.env.CLAUDE_CONFIG_DIR ?? join((globalThis as any).Bun?.homedir?.() ?? require('node:os').homedir(), '.claude'),
+    'settings.json',
+  )
+  const envBlock = JSON.parse(readFileSync(settingsPath, 'utf8')).env
+  if (envBlock && typeof envBlock === 'object') {
+    for (const [k, v] of Object.entries(envBlock)) {
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+        process.env[k] = String(v)
+      }
+    }
+  }
+} catch {
+  // settings.json 不存在/解析失败时静默跳过
+}
+
 // commander 15 不接受多字符短 flag（'-d2e, --debug-to-stderr'），与 devkit/build.ts
 // 的 dist 后处理一致：在源码模式下载入 src/main.tsx 时做同样替换。
 plugin({

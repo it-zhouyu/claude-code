@@ -25,7 +25,8 @@
       "watchMode": false
     },
     {
-      // 交互式调试：先在集成终端里运行（注意要用 =ws://... 显式指定地址，
+      // 交互式调试（鉴权 env 由 preload 从 ~/.claude/settings.json 自动加载，无需登录）：
+      // 在集成终端运行 ./devkit/debug-tui.sh（注意它用 =ws://... 显式指定地址，
       // 否则 Bun 会生成随机 token 路径，每次都得把终端打印的完整 URL 粘到下面 url 里）
       //   bun --inspect-wait=ws://localhost:6499/ --preload ./devkit/debug-preload.ts src/entrypoints/cli.tsx
       // 程序会暂停等待调试器，然后 F5 选择本配置附加。
