@@ -1444,10 +1444,12 @@ async function* queryLoop(
     }
 
     // streamingToolExecutor不可用就用runTools来执行工具
+    // toolUseBlocks就是大模型想要执行工具的信息
     const toolUpdates = streamingToolExecutor
       ? streamingToolExecutor.getRemainingResults()
       : runTools(toolUseBlocks, assistantMessages, canUseTool, toolUseContext)
 
+    // 将toolUpdates中的message放到toolResults，也就是工具执行结果
     for await (const update of toolUpdates) {
       if (update.message) {
         yield update.message
@@ -1466,6 +1468,8 @@ async function* queryLoop(
           ).filter(_ => _.type === 'user'),
         )
       }
+
+
       if (update.newContext) {
         updatedToolUseContext = {
           ...update.newContext,
@@ -1533,6 +1537,8 @@ async function* queryLoop(
       })
 
       // Fire off summary generation without blocking the next API call
+      // 异步调用haiku模型对刚刚的攻击执行进行总结，因为是异步所以不会阻塞，主线程会继续下一轮循环调用大模型
+      // 总结结果是给客户端看的，不会加到消息列表中，不会发送给大模型
       nextPendingToolUseSummary = generateToolUseSummary({
         tools: toolInfoForSummary,
         signal: toolUseContext.abortController.signal,
@@ -1549,10 +1555,12 @@ async function* queryLoop(
     }
 
     // We were aborted during tool calls
+    // 如果执行工具过程中被Ctrl+C打断了，会做一些清理动作
     if (toolUseContext.abortController.signal.aborted) {
       // chicago MCP: auto-unhide + lock release when aborted mid-tool-call.
       // This is the most likely Ctrl+C path for CU (e.g. slow screenshot).
       // Main thread only — see stopHooks.ts for the subagent rationale.
+      // Computer Use被中断做一些清理动作
       if (feature('CHICAGO_MCP') && !toolUseContext.agentId) {
         try {
           const { cleanupComputerUseAfterTurn } = await import(
@@ -1563,6 +1571,8 @@ async function* queryLoop(
           // Failures are silent — this is dogfooding cleanup, not critical path
         }
       }
+
+      // 创建一条UserMessage，内容为'[Request interrupted by user for tool use]'
       // Skip the interruption message for submit-interrupts — the queued
       // user message that follows provides sufficient context.
       if (toolUseContext.abortController.signal.reason !== 'interrupt') {
@@ -1570,7 +1580,9 @@ async function* queryLoop(
           toolUse: true,
         })
       }
+
       // Check maxTurns before returning when aborted
+      // 顺便判断是不是超过了最大轮次，如果超过了，也构造一条消息发送给客户端
       const nextTurnCountOnAbort = turnCount + 1
       if (maxTurns && nextTurnCountOnAbort > maxTurns) {
         yield createAttachmentMessage({
@@ -1579,10 +1591,16 @@ async function* queryLoop(
           turnCount: nextTurnCountOnAbort,
         })
       }
+
+      // 不管怎样，工具执行被打断了，都会退出当前循环
       return { reason: 'aborted_tools' }
     }
 
     // If a hook indicated to prevent continuation, stop here
+    // 这段是 PreToolUse hook 的「软停止」出口：hook 允许工具执行，但宣布「执行完就终止整个循环」。
+    // 工具跑完后，shouldPreventContinuation 标志为 true，
+    // query 在这里 return { reason: 'hook_stopped' }，不再让模型进入下一轮——把控制权交回给用户/调用方。 
+    // 它不是拒绝工具（那是 deny），而是「这一次可以，但到此为止」。
     if (shouldPreventContinuation) {
       return { reason: 'hook_stopped' }
     }
@@ -1630,6 +1648,8 @@ async function* queryLoop(
     // drain their own agentId. User prompts (mode:'prompt') still go to main
     // only; subagents never see the prompt stream.
     // eslint-disable-next-line custom-rules/require-tool-match-name -- ToolUseBlock.name has no aliases
+    
+    // 跟队列里的命令有关，先不看
     const sleepRan = toolUseBlocks.some(b => b.name === SLEEP_TOOL_NAME)
     const isMainThread =
       querySource.startsWith('repl_main_thread') || querySource === 'sdk'
@@ -1743,6 +1763,7 @@ async function* queryLoop(
     }
 
     // Each time we have tool results and are about to recurse, that's a turn
+    // 轮次加1
     const nextTurnCount = turnCount + 1
 
     // Periodic task summary for `claude ps` — fires mid-turn so a

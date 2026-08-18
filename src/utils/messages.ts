@@ -173,6 +173,7 @@ import {
   isToolSearchEnabledOptimistic,
 } from './toolSearch.js'
 
+// 注意：用户的下一条消息可能包含纠正或偏好。请密切关注——如果他们说明了哪里出了问题，或者希望以后怎么工作，考虑把它保存到记忆里，供以后的会话使用。
 const MEMORY_CORRECTION_HINT =
   "\n\nNote: The user's next message may contain a correction or preference. Pay close attention — if they explain what went wrong or how they'd prefer you to work, consider saving that to memory for future sessions."
 

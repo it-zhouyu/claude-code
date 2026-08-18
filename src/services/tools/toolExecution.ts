@@ -340,6 +340,8 @@ export async function* runToolUse(
   canUseTool: CanUseToolFn,
   toolUseContext: ToolUseContext,
 ): AsyncGenerator<MessageUpdateLazy, void> {
+
+  // 从toolUseContext.options.tools找到工具对象
   const toolName = toolUse.name
   // First try to find in the available tools (what the model sees)
   let tool = findToolByName(toolUseContext.options.tools, toolName)
@@ -347,6 +349,7 @@ export async function* runToolUse(
   // If not found, check if it's a deprecated tool being called by alias
   // (e.g., old transcripts calling "KillShell" which is now an alias for "TaskStop")
   // Only fall back for tools where the name matches an alias, not the primary name
+  // 找默认工具
   if (!tool) {
     const fallbackTool = findToolByName(getAllBaseTools(), toolName)
     // Only use fallback if the tool was found via alias (deprecated name)
@@ -393,6 +396,8 @@ export async function* runToolUse(
       }),
       ...mcpToolDetailsForAnalytics(toolName, mcpServerType, mcpServerBaseUrl),
     })
+
+    // 如果工具不存在，就返回一条UserMessage，既给用户看，也会返回给模型
     yield {
       message: createUserMessage({
         content: [
@@ -440,7 +445,10 @@ export async function* runToolUse(
           mcpServerBaseUrl,
         ),
       })
+
+      // 如果执行工具过程中被中断了，也返回一条UserMessage
       const content = createToolResultStopMessage(toolUse.id)
+      // 注意：用户的下一条消息可能包含纠正或偏好。请密切关注——如果他们说明了哪里出了问题，或者希望以后怎么工作，考虑把它保存到记忆里，供以后的会话使用。
       content.content = withMemoryCorrectionHint(CANCEL_MESSAGE)
       yield {
         message: createUserMessage({
@@ -452,6 +460,7 @@ export async function* runToolUse(
       return
     }
 
+    // 正常执行工具，权限审核机制都在里面，核心逻辑
     for await (const update of streamedCheckPermissionsAndCallTool(
       tool,
       toolUse.id,
@@ -472,6 +481,7 @@ export async function* runToolUse(
     const toolInfo = tool ? ` (${tool.name})` : ''
     const detailedError = `Error calling tool${toolInfo}: ${errorMessage}`
 
+    // 整个过程执行失败，也会返回一条UserMessage
     yield {
       message: createUserMessage({
         content: [
@@ -507,6 +517,8 @@ function streamedCheckPermissionsAndCallTool(
   // Ideally the progress reporting and tool call reporting would
   // be via separate mechanisms.
   const stream = new Stream<MessageUpdateLazy>()
+  
+  // 检查权限并执行工具，核心
   checkPermissionsAndCallTool(
     tool,
     toolUseID,
@@ -546,6 +558,8 @@ function streamedCheckPermissionsAndCallTool(
           mcpServerBaseUrl,
         ),
       })
+
+      // stream本质上就是一个队列，只是队列为空时，消费者会阻塞等待消息
       stream.enqueue({
         message: createProgressMessage({
           toolUseID: progress.toolUseID,
@@ -556,6 +570,7 @@ function streamedCheckPermissionsAndCallTool(
     },
   )
     .then(results => {
+      // 工具执行结果也入队
       for (const result of results) {
         stream.enqueue(result)
       }
@@ -584,11 +599,18 @@ export function buildSchemaNotSentHint(
   // computation is fragile. These two gates prevent pointing at a ToolSearch
   // that isn't callable; occasional misfires (Haiku, tst-auto below threshold)
   // cost one extra round-trip on an already-failing path.
+
+  // ToolSearch功能是否开启
   if (!isToolSearchEnabledOptimistic()) return null
+  // ToolSearch工具是否可用
   if (!isToolSearchToolAvailable(tools)) return null
+  // 当前工具是不是延迟加载
   if (!isDeferredTool(tool)) return null
   const discovered = extractDiscoveredToolNames(messages)
   if (discovered.has(tool.name)) return null
+
+  // 如果工具延迟加载的
+  // 翻译：这个工具的 schema 没有发送给 API——它不在根据消息历史推导出的"已发现工具集合"里，由于你的提示词中没有该 schema，带类型的参数（数组、数字、布尔值）会被当作字符串发出，客户端解析器会拒绝它们，请先加载该工具：调用 ${TOOL_SEARCH_TOOL_NAME}，query 为 "select:${tool.name}"，然后重试此调用
   return (
     `\n\nThis tool's schema was not sent to the API — it was not in the discovered-tool set derived from message history. ` +
     `Without the schema in your prompt, typed parameters (arrays, numbers, booleans) get emitted as strings and the client-side parser rejects them. ` +
@@ -611,9 +633,15 @@ async function checkPermissionsAndCallTool(
     progress: ToolProgress<ToolProgressData> | ProgressMessage<HookProgress>,
   ) => void,
 ): Promise<MessageUpdateLazy[]> {
+
   // Validate input types with zod (surprisingly, the model is not great at generating valid input)
+  // 用zod对input进行类型校验，翻译：令人意外的是，模型并不擅长生成合法的输入
+  // parse校验失败会抛异常，safeParse不抛，而是返回 {success: false, error}
   const parsedInput = tool.inputSchema.safeParse(input)
+
+  // 如果类型校验不成功
   if (!parsedInput.success) {
+    // 把zod原始的错误信息翻译为对模型更友好的自然语言
     let errorContent = formatZodValidationError(tool.name, parsedInput.error)
 
     const schemaHint = buildSchemaNotSentHint(
@@ -661,6 +689,8 @@ async function checkPermissionsAndCallTool(
       }),
       ...mcpToolDetailsForAnalytics(tool.name, mcpServerType, mcpServerBaseUrl),
     })
+
+    // 类型校验失败返回UserMessage
     return [
       {
         message: createUserMessage({
@@ -680,6 +710,8 @@ async function checkPermissionsAndCallTool(
   }
 
   // Validate input values. Each tool has its own validation logic
+  // 验证工具的输入参数是否合法
+  // 比如FileReadTool的validateInput会解析传的PDF页码范围是不是正确，或者解析file_path是不是命中了FileRead(...) deny规则
   const isValidCall = await tool.validateInput?.(
     parsedInput.data,
     toolUseContext,
@@ -714,6 +746,8 @@ async function checkPermissionsAndCallTool(
       }),
       ...mcpToolDetailsForAnalytics(tool.name, mcpServerType, mcpServerBaseUrl),
     })
+
+    // 入参数据校验失败返回UserMessage
     return [
       {
         message: createUserMessage({
@@ -743,6 +777,9 @@ async function checkPermissionsAndCallTool(
     'command' in parsedInput.data
   ) {
     const appState = toolUseContext.getAppState()
+
+    // speculative：投机、预判
+    // 用分类器判断当前bash命令能不能执行，这里只是启动分类器，异步的，不会阻塞当前线程，后面有地方取分类器的执行结果。
     startSpeculativeClassifierCheck(
       (parsedInput.data as BashToolInput).command,
       appState.toolPermissionContext,
@@ -758,6 +795,11 @@ async function checkPermissionsAndCallTool(
   // system (SedEditPermissionRequest) after user approval. If the model supplies
   // it, the schema's strictObject should already reject it, but we strip here
   // as a safeguard against future regressions.
+  // defense-in-depth, 纵深防御
+  // 第一道防线：工具的 schema（输入格式定义）用了 strictObject，按理说模型传了不认识的字段会被直接拒绝报错
+  // 第二道防线（就是这段代码）：万一哪天第一道防线出了 bug、或者 schema 改松了，模型塞进来的 _simulatedSedEdit 字段还会被这里手动删掉
+  // 如果模型在 Bash 命令的输入里偷偷塞了 _simulatedSedEdit 这个本该由权限系统注入的"通行证"字段，就把它删掉，防止模型伪造用户授权
+  // 具体看笔记里有解释。
   let processedInput = parsedInput.data
   if (
     tool.name === BASH_TOOL_NAME &&
@@ -780,6 +822,8 @@ async function checkPermissionsAndCallTool(
   // transcript and VCR fixture hashes. If a hook/permission later returns a
   // fresh updatedInput, callInput converges on it below — that replacement
   // is intentional and should reach call().
+  // 调用工具的回填方法，比如FileReadTool，将相对路径改为绝对路径
+  // 注意，processedInput会修改，然后传给hook， callInput不会修改，真正调用工具时传的是callInput
   let callInput = processedInput
   const backfilledClone =
     tool.backfillObservableInput &&
@@ -797,6 +841,7 @@ async function checkPermissionsAndCallTool(
   let hookPermissionResult: PermissionResult | undefined
   const preToolHookInfos: StopHookInfo[] = []
   const preToolHookStart = Date.now()
+  // 执行PreToolUseHooks
   for await (const result of runPreToolUseHooks(
     toolUseContext,
     tool,
@@ -829,20 +874,30 @@ async function checkPermissionsAndCallTool(
         }
         break
       case 'hookPermissionResult':
+        // hook直接做了权限决定
+        // hook返回的hookPermissionResult有哪几种情况？
+        // undefined: hook 没做权限决定（可能只改了输入或加了上下文）
+        // { behavior: 'allow', ... }，hook 放行
+        // { behavior: 'deny', ... }, hook 拒绝
+        // { behavior: 'ask', ... }, hook 要求询问用户
         hookPermissionResult = result.hookPermissionResult
         break
       case 'hookUpdatedInput':
         // Hook provided updatedInput without making a permission decision (passthrough)
         // Update processedInput so it's used in the normal permission flow
+        // hook改了输入
         processedInput = result.updatedInput
         break
       case 'preventContinuation':
+        // hook阻止继续执行
         shouldPreventContinuation = result.shouldPreventContinuation
         break
       case 'stopReason':
+        // hook阻止继续执行
         stopReason = result.stopReason
         break
       case 'additionalContext':
+        // hook往上下文添加消息
         resultingMessages.push(result.message)
         break
       case 'stop':
@@ -860,6 +915,8 @@ async function checkPermissionsAndCallTool(
         return resultingMessages
     }
   }
+
+  // hook执行太久，记录日志
   const preToolHookDurationMs = Date.now() - preToolHookStart
   getStatsStore()?.observe('pre_tool_hook_duration_ms', preToolHookDurationMs)
   if (preToolHookDurationMs >= SLOW_PHASE_LOG_THRESHOLD_MS) {
@@ -871,6 +928,7 @@ async function checkPermissionsAndCallTool(
 
   // Emit PreToolUse summary immediately so it's visible while the tool executes.
   // Use wall-clock time (not sum of individual durations) since hooks run in parallel.
+  // 执行得慢，也返回一条消息显示给用户，让用户知道
   if (process.env.USER_TYPE === 'ant' && preToolHookInfos.length > 0) {
     if (preToolHookDurationMs > HOOK_TIMING_DISPLAY_THRESHOLD_MS) {
       resultingMessages.push({
@@ -918,6 +976,7 @@ async function checkPermissionsAndCallTool(
   const permissionMode = toolUseContext.getAppState().toolPermissionContext.mode
   const permissionStart = Date.now()
 
+  // hook执行完了，根据hook的执行结果再次进行判断
   const resolved = await resolveHookPermissionDecision(
     hookPermissionResult,
     tool,
@@ -927,13 +986,18 @@ async function checkPermissionsAndCallTool(
     assistantMessage,
     toolUseID,
   )
+  // 拿到决策结果，allow / deny / ask
   const permissionDecision = resolved.decision
   processedInput = resolved.input
+  // 决策花了多久
   const permissionDurationMs = Date.now() - permissionStart
+  
   // In auto mode, canUseTool awaits the classifier (side_query) — if that's
   // slow the collapsed view shows "Running…" with no (Ns) tick since
   // bash_progress hasn't started yet. Auto-only: in default mode this timer
   // includes interactive-dialog wait (user think time), which is just noise.
+  // 如果在 auto 模式下决策超过某个阈值（比如分类器跑太慢），就记一条调试日志。
+  // 注释特意说，只在 auto 模式记——因为默认模式下这个时间包含了"用户盯着弹窗发呆"的时间，那是人慢不是系统慢，记下来纯属噪音。
   if (
     permissionDurationMs >= SLOW_PHASE_LOG_THRESHOLD_MS &&
     permissionMode === 'auto'
@@ -949,6 +1013,7 @@ async function checkPermissionsAndCallTool(
   // permission path didn't already log it (headless mode bypasses permission
   // logging, so we need to emit both the generic event and the code-edit
   // counter here)
+  // 如果决策不是ask，那就是allow或deny，允许或拒绝，那就记录一下，没什么特别的
   if (
     permissionDecision.behavior !== 'ask' &&
     !toolUseContext.toolDecisions?.has(toolUseID)
@@ -977,6 +1042,7 @@ async function checkPermissionsAndCallTool(
   }
 
   // Add message if permission was granted/denied by PermissionRequest hook
+  // 如果这次允许/拒绝是某个叫 PermissionRequest 的 hook做出的（而不是用户点的或自动规则），就在对话里加一条可见的提示消息，让用户知道"是 hook 替你做的主"。
   if (
     permissionDecision.decisionReason?.type === 'hook' &&
     permissionDecision.decisionReason.hookName === 'PermissionRequest' &&
@@ -992,6 +1058,7 @@ async function checkPermissionsAndCallTool(
     })
   }
 
+  // deny或ask
   if (permissionDecision.behavior !== 'allow') {
     logForDebugging(`${tool.name} tool permission denied`)
     const decisionInfo = toolUseContext.toolDecisions?.get(toolUseID)
@@ -1061,6 +1128,7 @@ async function checkPermissionsAndCallTool(
       }
     }
 
+    // 工具被拒了，造一条UserMessage给模型知道
     resultingMessages.push({
       message: createUserMessage({
         content: messageContent,
@@ -1072,6 +1140,8 @@ async function checkPermissionsAndCallTool(
 
     // Run PermissionDenied hooks for auto mode classifier denials.
     // If a hook returns {retry: true}, tell the model it may retry.
+    // 跑 PermissionDenied hooks（仅 auto 模式分类器拒绝时）
+    // 这是给用户一个"翻盘"机会——如果某个 hook 说"其实这个命令现在审核过了，可以重试"，就额外加一条消息告诉模型"你可以再试一次"。
     if (
       feature('TRANSCRIPT_CLASSIFIER') &&
       permissionDecision.decisionReason?.type === 'classifier' &&
@@ -1102,6 +1172,8 @@ async function checkPermissionsAndCallTool(
 
     return resultingMessages
   }
+
+  // 记一条权限允许的分析事件
   logEvent('tengu_tool_use_can_use_tool_allowed', {
     messageID:
       messageId as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -1127,6 +1199,7 @@ async function checkPermissionsAndCallTool(
 
   // Use the updated input from permissions if provided
   // (Don't overwrite if undefined - processedInput may have been modified by passthrough hooks)
+  // 权限系统在做决策时，可能顺手改了输入（比如用户在权限弹窗里编辑了一下命令）。如果有改，就用改后的版本；如果没改（undefined），就保留现在的
   if (permissionDecision.updatedInput !== undefined) {
     processedInput = permissionDecision.updatedInput
   }
@@ -1204,6 +1277,8 @@ async function checkPermissionsAndCallTool(
     callInput = processedInput
   }
   try {
+
+    // 调用工具
     const result = await tool.call(
       callInput,
       {
@@ -1269,6 +1344,8 @@ async function checkPermissionsAndCallTool(
     }
 
     // Capture structured output from tool result if present
+    // result中有一个structured_output字段，表示结构化输出
+    // 有些工具除了给人看的文本结果，还会返回结构化数据（给程序用的）。如果有，单独存一条消息。
     if (typeof result === 'object' && 'structured_output' in result) {
       // Store the structured output in an attachment message
       resultingMessages.push({
@@ -1289,6 +1366,7 @@ async function checkPermissionsAndCallTool(
 
     // Map the tool result to API format once and cache it. This block is reused
     // by addToolResult (skipping the remap) and measured here for analytics.
+    // 把工具的结果转成发给 API 的格式（tool_result 块），并算一下结果多大（字节数）
     const mappedToolResultBlock = tool.mapToolResultToToolResultBlockParam(
       result.data,
       toolUseID,
@@ -1301,6 +1379,7 @@ async function checkPermissionsAndCallTool(
         : jsonStringify(mappedContent).length
 
     // Extract file extension for file-related tools
+    // 提取文件扩展名
     let fileExtension: ReturnType<typeof getFileExtensionForAnalytics>
     if (processedInput && typeof processedInput === 'object') {
       if (
@@ -1328,6 +1407,8 @@ async function checkPermissionsAndCallTool(
       }
     }
 
+    // 记一条"工具执行成功"的分析事件（tengu_tool_use_success），带上耗时、结果大小、文件扩展名等
+    // 让产品团队知道：用户最常操作什么文件、工具一般跑多久、结果一般多大
     logEvent('tengu_tool_use_success', {
       messageID:
         messageId as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -1357,6 +1438,7 @@ async function checkPermissionsAndCallTool(
     })
 
     // Enrich tool parameters with git commit ID from successful git commit output
+    // 如果是 git commit 命令，从输出里解析出 commit ID
     if (
       isToolDetailsLoggingEnabled() &&
       (tool.name === BASH_TOOL_NAME || tool.name === POWERSHELL_TOOL_NAME) &&

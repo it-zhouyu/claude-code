@@ -477,8 +477,11 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
   assistantMessage,
   toolUseID,
 ): Promise<PermissionDecision> => {
+
+  // 这里面做规则和模式匹配
   const result = await hasPermissionsToUseToolInner(tool, input, context)
 
+  // 接下来对result做"模式转换"，比如结果是ask，但是模式如果是dontAsk，那就直接转成deny
 
   // Reset consecutive denials on any allowed tool use in auto mode.
   // This ensures that a successful tool use (even one auto-allowed by rules)
@@ -504,7 +507,8 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
   // This is done at the end so it can't be bypassed by early returns
   if (result.behavior === 'ask') {
     const appState = context.getAppState()
-
+    
+    // 如果结果是ask，模式是dontAsk，转成deny
     if (appState.toolPermissionContext.mode === 'dontAsk') {
       return {
         behavior: 'deny',
@@ -515,8 +519,10 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
         message: DONT_ASK_REJECT_MESSAGE(tool.name),
       }
     }
+
     // Apply auto mode: use AI classifier instead of prompting user
     // Check this BEFORE shouldAvoidPermissionPrompts so classifiers work in headless mode
+    // 如果结果是ask，模式是auto，走分类器流程
     if (
       feature('TRANSCRIPT_CLASSIFIER') &&
       (appState.toolPermissionContext.mode === 'auto' ||
@@ -597,6 +603,8 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
       // acceptEdits mode, which would silently bypass the classifier. REPL
       // code can contain VM escapes between inner tool calls; the classifier
       // must see the glue JavaScript, not just the inner tool calls.
+      // 本来是ask，但现在是auto mode模式，并且执行的工具不是agent和repl，那就把模式临时改成acceptEdits，再跑一次工具的checkPermissions
+      // 如果工具在acceptEdits 模式下会放行（比如 cwd 内的 Edit），那就跳过分类器，直接 allow
       if (
         result.behavior === 'ask' &&
         tool.name !== AGENT_TOOL_NAME &&
@@ -686,10 +694,12 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
       }
 
       // Run the auto mode classifier
+      // 执行auto mode分类器
       const action = formatActionForClassifier(tool.name, input)
       setClassifierChecking(toolUseID)
       let classifierResult
       try {
+        // 核心
         classifierResult = await classifyYoloAction(
           context.messages,
           action,
@@ -929,6 +939,9 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
     // When permission prompts should be avoided (e.g., background/headless agents),
     // run PermissionRequest hooks first to give them a chance to allow/deny.
     // Only auto-deny if no hook provides a decision.
+    // 如果结果是ask，shouldAvoidPermissionPrompts为true，表示不能弹窗
+    // 那就跑一下PermissionRequestHooks，如果PermissionRequestHooks没给决定就拒绝
+    // 这个是专门给background/headless agents情况下用的
     if (appState.toolPermissionContext.shouldAvoidPermissionPrompts) {
       const hookDecision = await runPermissionRequestHooksForHeadlessAgent(
         tool,
@@ -952,6 +965,7 @@ export const hasPermissionsToUseTool: CanUseToolFn = async (
     }
   }
 
+  // 其他情况原样返回
   return result
 }
 
@@ -1076,6 +1090,7 @@ export async function checkRuleBasedPermissions(
   const appState = context.getAppState()
 
   // 1a. Entire tool is denied by rule
+  // 匹配 alwaysDenyRules（settings.json）规则
   const denyRule = getDenyRuleForTool(appState.toolPermissionContext, tool)
   if (denyRule) {
     return {
@@ -1089,6 +1104,7 @@ export async function checkRuleBasedPermissions(
   }
 
   // 1b. Entire tool has an ask rule
+  // 匹配 alwaysAskRules（settings.json）规则
   const askRule = getAskRuleForTool(appState.toolPermissionContext, tool)
   if (askRule) {
     const canSandboxAutoAllow =
@@ -1117,6 +1133,7 @@ export async function checkRuleBasedPermissions(
   }
   try {
     const parsedInput = tool.inputSchema.parse(input)
+    // 执行工具自己的权限检查
     toolPermissionResult = await tool.checkPermissions(parsedInput, context)
   } catch (e) {
     if (e instanceof AbortError || e instanceof APIUserAbortError) {
@@ -1168,6 +1185,7 @@ async function hasPermissionsToUseToolInner(
 
   // 1. Check if the tool is denied
   // 1a. Entire tool is denied
+  // 1a. 整工具本拒绝，那就直接返回deny
   const denyRule = getDenyRuleForTool(appState.toolPermissionContext, tool)
   if (denyRule) {
     return {
@@ -1181,6 +1199,8 @@ async function hasPermissionsToUseToolInner(
   }
 
   // 1b. Check if the entire tool should always ask for permission
+  // 1a. 整工具是ask，那就看是不是bash+沙箱，如果不是就还是返回ask
+  // 如果bash工具写进了ask表，那么表示执行bash工具就要询问用户，但是如果是在沙箱里，就不需要了
   const askRule = getAskRuleForTool(appState.toolPermissionContext, tool)
   if (askRule) {
     // When autoAllowBashIfSandboxed is on, sandboxed commands skip the ask rule and
@@ -1192,6 +1212,9 @@ async function hasPermissionsToUseToolInner(
       SandboxManager.isAutoAllowBashIfSandboxedEnabled() &&
       shouldUseSandbox(input)
 
+    // 如果执行的不是Bash工具，那就直接返回ask了，bypass不会生效，bypass只对"规则没命中的默认询问"生效
+    // 所以，如果是bash+ask+沙箱，那么canSandboxAutoAllow就是true，就会接着走下面的流程
+    // 否则，都会直接返回ask
     if (!canSandboxAutoAllow) {
       return {
         behavior: 'ask',
@@ -1207,12 +1230,16 @@ async function hasPermissionsToUseToolInner(
 
   // 1c. Ask the tool implementation for a permission result
   // Overridden unless tool input schema is not valid
+  // 1c. 做工具内容级检查
+  // 走到这，表示整工具是允许的，那就得检查内容了
   let toolPermissionResult: PermissionResult = {
     behavior: 'passthrough',
     message: createPermissionRequestMessage(tool.name),
   }
   try {
     const parsedInput = tool.inputSchema.parse(input)
+
+    // 调用checkPermissions()，工具自己检查是否有执行权限
     toolPermissionResult = await tool.checkPermissions(parsedInput, context)
   } catch (e) {
     // Rethrow abort errors so they propagate properly
@@ -1223,11 +1250,14 @@ async function hasPermissionsToUseToolInner(
   }
 
   // 1d. Tool implementation denied permission
+  // 1d. 内容级工具检查为deny，那就直接返回deny
   if (toolPermissionResult?.behavior === 'deny') {
     return toolPermissionResult
   }
 
   // 1e. Tool requires user interaction even in bypass mode
+  // 1e. 工具允许交互，并且内容级匹配了ask，那就ask
+  // 否则内容级就是允许的，就得看权限模式了
   if (
     tool.requiresUserInteraction?.() &&
     toolPermissionResult?.behavior === 'ask'
@@ -1269,6 +1299,7 @@ async function hasPermissionsToUseToolInner(
     appState.toolPermissionContext.mode === 'bypassPermissions' ||
     (appState.toolPermissionContext.mode === 'plan' &&
       appState.toolPermissionContext.isBypassPermissionsModeAvailable)
+  // 如果前面的规则没有命中deny或ask，但是是  bypassPermissions，那就直接返回allow  
   if (shouldBypassPermissions) {
     return {
       behavior: 'allow',
@@ -1281,6 +1312,7 @@ async function hasPermissionsToUseToolInner(
   }
 
   // 2b. Entire tool is allowed
+  // 如果不是bypassPermissions，那就直接返回allow，但是命中了allow，那就返回allow
   const alwaysAllowedRule = toolAlwaysAllowedRule(
     appState.toolPermissionContext,
     tool,
@@ -1297,6 +1329,7 @@ async function hasPermissionsToUseToolInner(
   }
 
   // 3. Convert "passthrough" to "ask"
+  // 剩余情况都是返回ask
   const result: PermissionDecision =
     toolPermissionResult.behavior === 'passthrough'
       ? {

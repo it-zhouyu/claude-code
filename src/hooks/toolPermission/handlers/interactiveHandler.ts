@@ -89,6 +89,7 @@ function handleInteractivePermission(
     }
   }
 
+  // 这里就是弹窗内容和回调
   ctx.pushToQueue({
     assistantMessage: ctx.assistantMessage,
     tool: ctx.tool,
@@ -157,6 +158,9 @@ function handleInteractivePermission(
       feedback?: string,
       contentBlocks?: ContentBlockParam[],
     ) {
+      // 用户点了允许
+
+      // 原子抢占：保证多路赛跑里只有一路能生效
       if (!claim()) return // atomic check-and-mark before await
 
       if (bridgeCallbacks && bridgeRequestId) {
@@ -170,6 +174,7 @@ function handleInteractivePermission(
       channelUnsubscribe?.()
 
       resolveOnce(
+        // 持久化"记住"的规则、记日志、构造 allow 决策
         await ctx.handleUserAllow(
           updatedInput,
           permissionUpdates,
@@ -181,6 +186,8 @@ function handleInteractivePermission(
       )
     },
     onReject(feedback?: string, contentBlocks?: ContentBlockParam[]) {
+      // 用户点了拒绝
+
       if (!claim()) return
 
       if (bridgeCallbacks && bridgeRequestId) {
@@ -191,7 +198,8 @@ function handleInteractivePermission(
         bridgeCallbacks.cancelRequest(bridgeRequestId)
       }
       channelUnsubscribe?.()
-
+      
+      // 记日志
       ctx.logDecision(
         {
           decision: 'reject',
@@ -199,6 +207,8 @@ function handleInteractivePermission(
         },
         { permissionPromptStartTimeMs },
       )
+
+      // 构造 deny 决策
       resolveOnce(ctx.cancelAndAbort(feedback, undefined, contentBlocks))
     },
     async recheckPermission() {

@@ -23,16 +23,21 @@ export async function* runTools(
   toolUseContext: ToolUseContext,
 ): AsyncGenerator<MessageUpdate, void> {
   let currentContext = toolUseContext
+
+  // partitionToolCalls对工具进行分批
   for (const { isConcurrencySafe, blocks } of partitionToolCalls(
     toolUseMessages,
     currentContext,
   )) {
+    // 该组工具是并发安全的，那就runToolsConcurrently并发执行
     if (isConcurrencySafe) {
       const queuedContextModifiers: Record<
         string,
         ((context: ToolUseContext) => ToolUseContext)[]
       > = {}
+
       // Run read-only batch concurrently
+      // 并行执行只读工具
       for await (const update of runToolsConcurrently(
         blocks,
         assistantMessages,
@@ -92,12 +97,16 @@ function partitionToolCalls(
   toolUseMessages: ToolUseBlock[],
   toolUseContext: ToolUseContext,
 ): Batch[] {
+  // 1. 只读安全的工具（比如读文件、查目录，不改动任何东西），把相邻的几个攒成一批，可以一起并发跑。
+  // 2. 非只读的工具（比如写文件、改文件、跑命令，会改动世界），每个单独成一批，必须老老实实排队串行跑。
+  // 别纠结reduce怎么工作的，反正就是分组
   return toolUseMessages.reduce((acc: Batch[], toolUse) => {
     const tool = findToolByName(toolUseContext.options.tools, toolUse.name)
     const parsedInput = tool?.inputSchema.safeParse(toolUse.input)
     const isConcurrencySafe = parsedInput?.success
       ? (() => {
           try {
+            // 每个工具自己定义isConcurrencySafe
             return Boolean(tool?.isConcurrencySafe(parsedInput.data))
           } catch {
             // If isConcurrencySafe throws (e.g., due to shell-quote parse failure),
@@ -157,9 +166,11 @@ async function* runToolsConcurrently(
 ): AsyncGenerator<MessageUpdateLazy, void> {
   yield* all(
     toolUseMessages.map(async function* (toolUse) {
+      // 记录工具真正执行
       toolUseContext.setInProgressToolUseIDs(prev =>
         new Set(prev).add(toolUse.id),
       )
+      // 执行工具
       yield* runToolUse(
         toolUse,
         assistantMessages.find(_ =>
@@ -170,8 +181,11 @@ async function* runToolsConcurrently(
         canUseTool,
         toolUseContext,
       )
+      // 标记工具执行完成
       markToolUseAsComplete(toolUseContext, toolUse.id)
     }),
+
+    // 并发最大限制，默认为10
     getMaxToolUseConcurrency(),
   )
 }

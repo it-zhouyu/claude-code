@@ -353,6 +353,7 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
 
   async validateInput({ skill }, context): Promise<ValidationResult> {
     // Skills are just skill names, no arguments
+    // 空名检查，把名字前后空格去掉。如果去完是空字符串
     const trimmed = skill.trim()
     if (!trimmed) {
       return {
@@ -363,6 +364,9 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     }
 
     // Remove leading slash if present (for compatibility)
+    // 去掉开头的斜杠
+    // 模型可能传 "/commit" 也可能传 "commit"，为了统一处理，把开头的 / 削掉。
+    // 顺带：如果真的带了斜杠，记一条埋点日志（说明模型用“用户视角”的写法调了工具，官方想统计这种情况）
     const hasLeadingSlash = trimmed.startsWith('/')
     if (hasLeadingSlash) {
       logEvent('tengu_skill_tool_slash_prefix', {})
@@ -374,6 +378,8 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     // Remote canonical skill handling (ant-only experimental). Intercept
     // `_canonical_<slug>` names before local command lookup since remote
     // skills are not in the local command registry.
+    // 这是一个只对内部员工（ant = Anthropic 员工）+ 实验开关打开时才生效的分支。
+    // 处理的是 _canonical_xxx 这种特殊前缀的技能名——它们不存在于本地命令表里，所以必须在本地查找之前先截住
     if (
       feature('EXPERIMENTAL_SKILL_SEARCH') &&
       process.env.USER_TYPE === 'ant'
@@ -396,9 +402,11 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     }
 
     // Get available commands (including MCP skills)
+    // 拿到所有技能
     const commands = await getAllCommands(context)
 
     // Check if command exists
+    // 按名字找，找不到说明模型在“幻觉”一个不存在的技能
     const foundCommand = findCommand(normalizedCommandName, commands)
     if (!foundCommand) {
       return {
@@ -409,6 +417,8 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     }
 
     // Check if command has model invocation disabled
+    // 检查技能有没有禁止模型调用
+    // disable-model-invocation表示只能手动调用，不能大模型自动调用
     if (foundCommand.disableModelInvocation) {
       return {
         result: false,
@@ -418,6 +428,7 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     }
 
     // Check if command is a prompt-based command
+    // 类型是prompt的command才是技能
     if (foundCommand.type !== 'prompt') {
       return {
         result: false,
@@ -592,9 +603,11 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     // - Skill is a prompt-based skill
 
     // Skills are just names, with optional arguments
+    // 去空白符
     const trimmed = skill.trim()
 
     // Remove leading slash if present (for compatibility)
+    // 去反斜杠
     const commandName = trimmed.startsWith('/') ? trimmed.substring(1) : trimmed
 
     // Remote canonical skill execution (ant-only experimental). Intercepts
@@ -602,6 +615,7 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     // AKI/GCS (with local cache), injects content directly as a user message.
     // Remote skills are declarative markdown so no slash-command expansion
     // (no !command substitution, no $ARGUMENTS interpolation) is needed.
+    // 拉取并返回远程技能
     if (
       feature('EXPERIMENTAL_SKILL_SEARCH') &&
       process.env.USER_TYPE === 'ant'
@@ -612,13 +626,16 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
       }
     }
 
+    // 获取技能
     const commands = await getAllCommands(context)
     const command = findCommand(commandName, commands)
 
     // Track skill usage for ranking
+    // 把这次调用记入技能使用统计，用于技能排序
     recordSkillUsage(commandName)
 
     // Check if skill should run as a forked sub-agent
+    // 技能 frontmatter 里写 context: fork 的，不在主对话里展开，而是开一个子 agent 去跑，主对话只收到子 agent 的最终结果。
     if (command?.type === 'prompt' && command.context === 'fork') {
       return executeForkedSkill(
         command,
@@ -632,9 +649,11 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     }
 
     // Process the skill with optional args
+    // 核心，动态加载processSlashCommand.js
     const { processPromptSlashCommand } = await import(
       'src/utils/processUserInput/processSlashCommand.js'
     )
+    // 将SKILL.md正文处理为UserMessage
     const processedCommand = await processPromptSlashCommand(
       commandName,
       args || '', // Pass args if provided
@@ -647,6 +666,7 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
     }
 
     // Extract metadata from the command
+    // 技能 frontmatter 里声明的三样东西：允许的工具列表、模型覆盖、推理力度覆盖
     const allowedTools = processedCommand.allowedTools || []
     const model = processedCommand.model
     const effort = command?.type === 'prompt' ? command.effort : undefined
@@ -776,6 +796,7 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
         let modifiedContext = ctx
 
         // Update allowed tools if specified
+        // 把技能声明的工具追加进 alwaysAllowRules 白名单——技能说“我需要跑 bash”，后续 bash调用就不再弹权限确认
         if (allowedTools.length > 0) {
           // Capture the current getAppState to chain modifications properly
           const previousGetAppState = modifiedContext.getAppState
@@ -807,6 +828,8 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
 
         // Carry [1m] suffix over — otherwise a skill with `model: opus` on an
         // opus[1m] session drops the effective window to 200K and trips autocompact.
+        // 用 resolveSkillModelOverride 覆盖主循环模型。
+        // 注释里藏着一个真实的坑：session 是opus[1m]（百万上下文版）而技能写死 model: opus 时，直接覆盖会丢掉 [1m] 后缀，上下文从 1M 掉回200K，触发自动压缩——所以要“带后缀迁移”
         if (model) {
           modifiedContext = {
             ...modifiedContext,
@@ -821,6 +844,7 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
         }
 
         // Override effort level if skill specifies one
+        // 覆盖 effortValue（推理力度）
         if (effort !== undefined) {
           const previousGetAppState = modifiedContext.getAppState
           modifiedContext = {

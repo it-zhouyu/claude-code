@@ -153,3 +153,7 @@ src/utils/udsClient.js
 src/utils/udsMessaging.js
 src/utils/ultraplan/prompt.txt
 # <<< devkit debug stubs <<<
+
+# local machine artifacts
+.DS_Store
+.codegraph/

@@ -1016,10 +1016,15 @@ export async function classifyYoloAction(
   context: ToolPermissionContext,
   signal: AbortSignal,
 ): Promise<YoloClassifierResult> {
+  // 构造为字典，工具名:工具对象
   const lookup = buildToolLookup(tools)
+
+  // 拿action工具名去字典里找到工具，然后调它的toAutoClassifierInput()，只留关键字段 → 拼成一行
   const actionCompact = toCompact(action, lookup)
+  
   // '' = "no security relevance" (Tool.toAutoClassifierInput contract). Without
   // this guard the empty action block + cache_control below hits an API 400.
+  // 只要为''，这是一种阅读，表示工具可以执行，shouldBlock: false表示通过
   if (actionCompact === '') {
     return {
       shouldBlock: false,
@@ -1029,6 +1034,8 @@ export async function classifyYoloAction(
   }
 
   const systemPrompt = await buildYoloSystemPrompt(context)
+
+  // 
   const transcriptEntries = buildTranscriptEntries(messages)
   const claudeMdMessage = buildClaudeMdMessage()
   const prefixMessages: Anthropic.MessageParam[] = claudeMdMessage

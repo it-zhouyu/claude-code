@@ -437,6 +437,8 @@ export async function* runAgent({
     // Use explicit canShowPermissionPrompts if provided, otherwise:
     //   - bubble mode: always show prompts (bubbles to parent terminal)
     //   - default: !isAsync (sync agents show prompts, async agents don't)
+    // isAsync表示是异步后台agent
+    // canShowPermissionPrompts表示可以显示权限弹窗
     const shouldAvoidPrompts =
       canShowPermissionPrompts !== undefined
         ? !canShowPermissionPrompts
@@ -455,6 +457,7 @@ export async function* runAgent({
     // Since these are background agents, waiting is fine — the user should
     // only be interrupted when automated checks can't resolve the permission.
     // This applies to bubble mode (always) and explicit canShowPermissionPrompts.
+    // 如果是后台异步agent，并且可以显示权限弹窗，那么awaitAutomatedChecksBeforeDialog为true
     if (isAsync && !shouldAvoidPrompts) {
       toolPermissionContext = {
         ...toolPermissionContext,

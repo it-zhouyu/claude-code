@@ -815,6 +815,7 @@ function formatCommandLoadingMetadata(command: CommandBase & PromptCommand, args
   return formatSlashCommandLoadingMetadata(command.name, args);
 }
 export async function processPromptSlashCommand(commandName: string, args: string, commands: Command[], context: ToolUseContext, imageContentBlocks: ContentBlockParam[] = []): Promise<SlashCommandResult> {
+  // 拿到技能
   const command = findCommand(commandName, commands);
   if (!command) {
     throw new MalformedCommandError(`Unknown command: ${commandName}`);
@@ -822,6 +823,8 @@ export async function processPromptSlashCommand(commandName: string, args: strin
   if (command.type !== 'prompt') {
     throw new Error(`Unexpected ${command.type} command. Expected 'prompt' command. Use /${commandName} directly in the main conversation.`);
   }
+
+  // 处理为Message
   return getMessagesForPromptSlashCommand(command, args, context, [], imageContentBlocks);
 }
 async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCommand, args: string, context: ToolUseContext, precedingInputBlocks: ContentBlockParam[] = [], imageContentBlocks: ContentBlockParam[] = [], uuid?: string): Promise<SlashCommandResult> {
@@ -866,11 +869,16 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
       command
     };
   }
+
+  // 展开技能
+  // 读 SKILL.md、解析 frontmatter、把 args 填进 $ARGUMENTS 占位符、执行 !`shell命令` 的预取替换、展开 @文件 引用等。
+  // 产出是一组文本块（ContentBlockParam[]）
   const result = await command.getPromptForCommand(args, context);
 
   // Register skill hooks if defined. Under ["hooks"]-only (skills not locked),
   // user skills still load and reach this point — block hook REGISTRATION here
   // where source is known. Mirrors the agent frontmatter gate in runAgent.ts.
+  // 注册技能自带的 hooks
   const hooksAllowedForThisSkill = !isRestrictedToPluginOnly('hooks') || isSourceAdminTrusted(command.source);
   if (command.hooks && hooksAllowedForThisSkill) {
     const sessionId = getSessionId();
@@ -880,13 +888,21 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
   // Record skill invocation for compaction preservation, scoped by agent context.
   // Skills are tagged with their agentId so only skills belonging to the current
   // agent are restored during compaction (preventing cross-agent leaks).
+  // 把技能名 + 路径 + 完整正文记进会话状态，并打上当前 agent 的标记。
+  // 用途是上下文压缩（compaction）时的保全：对话太长被压缩时，知道哪些技能正文不能被摘要掉；
+  // 按 agentId 隔离是为了防止 A agent 的技能内容泄漏到 B agent 的恢复结果里。
   const skillPath = command.source ? `${command.source}:${command.name}` : command.name;
   const skillContent = result.filter((b): b is TextBlockParam => b.type === 'text').map(b => b.text).join('\n\n');
   addInvokedSkill(command.name, skillPath, skillContent, getAgentContext()?.agentId ?? null);
+  
+  
   const metadata = formatCommandLoadingMetadata(command, args);
+
+  // 把 frontmatter 里的 allowed-tools 字符串解析成数组
   const additionalAllowedTools = parseToolListFromCLI(command.allowedTools ?? []);
 
   // Create content for the main message, including any pasted images
+  // 拼正文内容，包含贴的图片
   const mainMessageContent: ContentBlockParam[] = imageContentBlocks.length > 0 || precedingInputBlocks.length > 0 ? [...imageContentBlocks, ...precedingInputBlocks, ...result] : result;
 
   // Extract attachments from command arguments (@-mentions, MCP resources,
@@ -899,6 +915,12 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
   context.messages, 'repl_main_thread', {
     skipSkillDiscovery: true
   }));
+
+  // 组装消息数组，四个部分
+  // 1.命令标签消息 给UI显示用
+  // 2.技能正文消息 isMeta为true，不显示给用户，但是会发送给大模型
+  // 3.附件，内容是技能正文里 @文件、MCP 资源、agent 定义展开出的文件全文，模型看到的是包在 system-reminder 里的文件内容（“以下是 xxx 文件的内容……”）， UI：渲染成 "Read src/foo.ts" 之类的行，让用户知道哪些文件被自动带进来了
+  // 4.command_permissions 附件
   const messages = [createUserMessage({
     content: metadata,
     uuid
@@ -910,6 +932,7 @@ async function getMessagesForPromptSlashCommand(command: CommandBase & PromptCom
     allowedTools: additionalAllowedTools,
     model: command.model
   })];
+
   return {
     messages,
     shouldQuery: true,

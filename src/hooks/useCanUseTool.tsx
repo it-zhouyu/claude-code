@@ -25,17 +25,34 @@ import { handleSwarmWorkerPermission } from './toolPermission/handlers/swarmWork
 import { createPermissionContext, createPermissionQueueOps } from './toolPermission/PermissionContext.js';
 import { logPermissionDecision } from './toolPermission/permissionLogging.js';
 export type CanUseToolFn<Input extends Record<string, unknown> = Record<string, unknown>> = (tool: ToolType, input: Input, toolUseContext: ToolUseContext, assistantMessage: AssistantMessage, toolUseID: string, forceDecision?: PermissionDecision<Input>) => Promise<PermissionDecision<Input>>;
+
+// 核心逻辑，canUseTool可以有很多实现，交互式 REPL的场景下，useCanUseTool就是canUseTool的实现
 function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
   const $ = _c(3);
   let t0;
   if ($[0] !== setToolPermissionContext || $[1] !== setToolUseConfirmQueue) {
+
+    // 这里就是canUseTool的具体实现
     t0 = async (tool, input, toolUseContext, assistantMessage, toolUseID, forceDecision) => new Promise(resolve => {
+      
+      // 创建权限上下文，把这次请求的所有信息打包成一个 ctx 对象，提供一堆工具方法
       const ctx = createPermissionContext(tool, input, toolUseContext, assistantMessage, toolUseID, setToolPermissionContext, createPermissionQueueOps(setToolUseConfirmQueue));
+      
+      // 请求被取消就直接结束，不再走后续流程
       if (ctx.resolveIfAborted(resolve)) {
         return;
       }
-      const decisionPromise = forceDecision !== undefined ? Promise.resolve(forceDecision) : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID);
+      
+      // hook返回ask时forceDecision才有值，值就是ask
+      // hook 已经明确说"要询问用户"，就没必要再重新跑一遍规则+模式匹配；直接用 hook 的 ask 进入弹窗流程，并且弹窗展示 hook 提供的消息
+      // 否则就执行hasPermissionsToUseTool进入规则匹配和模式适配
+      const decisionPromise = forceDecision !== undefined 
+        ? Promise.resolve(forceDecision)  // 有强制决策（比如 hook 返回 ask）直接用
+        : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID); // 否则跑"规则匹配 + 模式匹配"
+      
+      // 根据当前的决定分三种情况  
       return decisionPromise.then(async result => {
+        // 如果是allow，直接返回
         if (result.behavior === "allow") {
           if (ctx.resolveIfAborted(resolve)) {
             return;
@@ -47,11 +64,15 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
             decision: "accept",
             source: "config"
           });
+
+          // buildAllow会重新拼一个PermissionAllowDecision，其中包含的behavior为'allow'，以及updatedInput，后续会用来执行工具
+          // result.updatedInput ?? input的意思是，如果result.updatedInput是null或undefined时就取input
           resolve(ctx.buildAllow(result.updatedInput ?? input, {
             decisionReason: result.decisionReason
           }));
           return;
         }
+
         const appState = toolUseContext.getAppState();
         const description = await tool.description(input as never, {
           isNonInteractiveSession: toolUseContext.options.isNonInteractiveSession,
@@ -62,6 +83,7 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
           return;
         }
         switch (result.behavior) {
+          // 如果是拒绝，也直接返回
           case "deny":
             {
               logPermissionDecision({
@@ -87,12 +109,22 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
                   jsx: <><Text color="error">{tool.userFacingName(input).toLowerCase()} denied by auto mode</Text><Text dimColor={true}> · /permissions</Text></>
                 });
               }
+
+              // 没有对result进行处理，那么behavior就是deny
               resolve(result);
               return;
             }
           case "ask":
             {
+              // 在给子代理构建 ToolPermissionContext 的 agentGetAppState 函数里会将awaitAutomatedChecksBeforeDialog设置为true
+              // 如果是后台异步agent，并且可以显示权限弹窗，那么awaitAutomatedChecksBeforeDialog为true
               if (appState.toolPermissionContext.awaitAutomatedChecksBeforeDialog) {
+                
+                // 子代理场景下，权限尽量先让"自动机制"（hook、分类器）决定，避免每个子代理都弹窗打扰用户
+                // handleCoordinatorPermission内部：
+                // 1. 先跑 PermissionRequest hooks（快、本地）, 有决定就用
+                // 2. 再跑 Bash 分类器（慢，仅 Bash）, 有决定就用
+                // 3. 都没有, 返回 null，落到后面的流程（最终还是要弹窗/转发）。
                 const coordinatorDecision = await handleCoordinatorPermission({
                   ctx,
                   ...(feature("BASH_CLASSIFIER") ? {
@@ -107,9 +139,13 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
                   return;
                 }
               }
+
+              // 请求被取消（用户按 Esc、agent 被 abort）就结束
               if (ctx.resolveIfAborted(resolve)) {
                 return;
               }
+
+              // 如果是swarm worker，注意swarm worker和后台异步Agent不是一回事，不是同一个场景
               const swarmDecision = await handleSwarmWorkerPermission({
                 ctx,
                 description,
@@ -123,11 +159,15 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
                 resolve(swarmDecision);
                 return;
               }
+
+              // 主Agent本身，对于bash命令，也用分类器检查一下
               if (feature("BASH_CLASSIFIER") && result.pendingClassifierCheck && tool.name === BASH_TOOL_NAME && !appState.toolPermissionContext.awaitAutomatedChecksBeforeDialog) {
+                // 分类器是提前投机启动的,弹窗还没弹它可能已经跑完了
                 const speculativePromise = peekSpeculativeClassifierCheck((input as {
                   command: string;
                 }).command);
                 if (speculativePromise) {
+                  // Promise.race 让分类器结果和 2 秒超时赛跑：分类器在 2 秒内给出"高置信度允许" → 直接批准，不用弹窗；超时或没命中 → 弹窗
                   const raceResult = await Promise.race([speculativePromise.then(_temp), new Promise(_temp2)]);
                   if (ctx.resolveIfAborted(resolve)) {
                     return;
@@ -157,6 +197,8 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
                   }
                 }
               }
+
+              // 这里面就是弹窗逻辑，前面都没有得到检查结果，就弹窗问用户
               handleInteractivePermission({
                 ctx,
                 description,

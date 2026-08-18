@@ -341,9 +341,14 @@ export async function resolveHookPermissionDecision(
   decision: PermissionDecision
   input: Record<string, unknown>
 }> {
+
+  // requiresInteraction为true，表示这个工具必须与真人交互，比如AskUserQuestionTool
   const requiresInteraction = tool.requiresUserInteraction?.()
+  // Claude Code有一套Prompt Suggestion（输入建议） 和 Speculation（投机/预执行）机制，会在后台猜你接下来的动作并执行，而在执行过程中，假如hook允许了某些命令那也是不行的，因为是后台执行不能轻易执行命令
   const requireCanUseTool = toolUseContext.requireCanUseTool
 
+  // 在这之前已经执行了hook，hook如果允许工具执行，但是工具要求真人交互，那就必须走canUseTool
+  // hook允许了，不代表最终就真的允许了
   if (hookPermissionResult?.behavior === 'allow') {
     const hookInput = hookPermissionResult.updatedInput ?? input
 
@@ -354,9 +359,14 @@ export async function resolveHookPermissionDecision(
       requiresInteraction && hookPermissionResult.updatedInput !== undefined
 
     if ((requiresInteraction && !interactionSatisfied) || requireCanUseTool) {
+      // 钩子批准了这个工具，但因为上面两个原因之一，仍然需要走 canUseTool
       logForDebugging(
         `Hook approved tool use for ${tool.name}, but canUseTool is required`,
       )
+
+      // 走canUseTool，并return出canUseTool的结果
+      // hookInput是钩子改过的参数，如果钩子没改就是原始参数
+      // canUseTool里面就是规则匹配和模式匹配，包括ask的弹窗逻辑
       return {
         decision: await canUseTool(
           tool,
@@ -370,11 +380,15 @@ export async function resolveHookPermissionDecision(
     }
 
     // Hook allow skips the interactive prompt, but deny/ask rules still apply.
+    // Hook 允许命令的执行，还得检查用户自己设置的规则同不同意
+    // ruleCheck要么是null，表示用户没有设置规则，要么就是deny/ask
     const ruleCheck = await checkRuleBasedPermissions(
       tool,
       hookInput,
       toolUseContext,
     )
+
+    // 没有 deny/ask 规则命中
     if (ruleCheck === null) {
       logForDebugging(
         interactionSatisfied
@@ -383,13 +397,18 @@ export async function resolveHookPermissionDecision(
       )
       return { decision: hookPermissionResult, input: hookInput }
     }
+
+    // 命中了 deny 规则
+    // 用户设置了"这个工具/这类操作永远拒绝"，但钩子说可以 → 用户的 deny 规则赢，返回拒绝
     if (ruleCheck.behavior === 'deny') {
       logForDebugging(
         `Hook approved tool use for ${tool.name}, but deny rule overrides: ${ruleCheck.message}`,
       )
       return { decision: ruleCheck, input: hookInput }
     }
+
     // ask rule — dialog required despite hook approval
+    // 相当于用户设置了"这类操作永远要询问" → 就算钩子批准了，也必须弹窗问真人
     logForDebugging(
       `Hook approved tool use for ${tool.name}, but ask rule requires prompt`,
     )
@@ -419,6 +438,7 @@ export async function resolveHookPermissionDecision(
     hookPermissionResult.updatedInput
       ? hookPermissionResult.updatedInput
       : input
+  // 当hook返回ask时，ask被当做forceDecision传给了canUseTool
   return {
     decision: await canUseTool(
       tool,
