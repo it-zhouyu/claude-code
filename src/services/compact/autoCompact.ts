@@ -31,10 +31,14 @@ const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
 
 // Returns the context window size minus the max output tokens for the model
 export function getEffectiveContextWindowSize(model: string): number {
+  
+  // 预留给摘要的token数量，默认为20k
   const reservedTokensForSummary = Math.min(
     getMaxOutputTokensForModel(model),
     MAX_OUTPUT_TOKENS_FOR_SUMMARY,
   )
+
+  // 获得模型的最大上下文限制
   let contextWindow = getContextWindowForModel(model, getSdkBetas())
 
   const autoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
@@ -45,6 +49,7 @@ export function getEffectiveContextWindowSize(model: string): number {
     }
   }
 
+  // 200k-20k=180k
   return contextWindow - reservedTokensForSummary
 }
 
@@ -70,8 +75,10 @@ export const MANUAL_COMPACT_BUFFER_TOKENS = 3_000
 const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 
 export function getAutoCompactThreshold(model: string): number {
+  // // 有效的上下文窗口，200k-20k=180k
   const effectiveContextWindow = getEffectiveContextWindowSize(model)
 
+  // 再减去13k，也就是200k-20k-13k
   const autocompactThreshold =
     effectiveContextWindow - AUTOCOMPACT_BUFFER_TOKENS
 
@@ -182,6 +189,7 @@ export async function shouldAutoCompact(
     }
   }
 
+  // 开关
   if (!isAutoCompactEnabled()) {
     return false
   }
@@ -222,8 +230,11 @@ export async function shouldAutoCompact(
     }
   }
 
+  // 当前上下文占用了多少token
   const tokenCount = tokenCountWithEstimation(messages) - snipTokensFreed
+  // 压缩阈值
   const threshold = getAutoCompactThreshold(model)
+  // 有效的上下文窗口
   const effectiveWindow = getEffectiveContextWindowSize(model)
 
   logForDebugging(
@@ -285,6 +296,7 @@ export async function autoCompactIfNeeded(
   }
 
   // EXPERIMENT: Try session memory compaction first
+  // 执行sesstionMemory压缩
   const sessionMemoryResult = await trySessionMemoryCompaction(
     messages,
     toolUseContext.agentId,
@@ -310,6 +322,7 @@ export async function autoCompactIfNeeded(
   }
 
   try {
+    // 进行压缩
     const compactionResult = await compactConversation(
       messages,
       toolUseContext,

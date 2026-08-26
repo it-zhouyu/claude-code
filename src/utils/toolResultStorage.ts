@@ -774,6 +774,7 @@ export async function enforceToolResultBudget(
   messages: Message[]
   newlyReplaced: ToolResultReplacementRecord[]
 }> {
+  // 找出tool_result的UserMessage
   const candidatesByMessage = collectCandidatesByMessage(messages)
   const nameByToolUseId =
     skipToolNames.size > 0 ? buildToolNameMap(messages) : undefined
@@ -825,6 +826,10 @@ export async function enforceToolResultBudget(
     const frozenSize = frozen.reduce((sum, c) => sum + c.size, 0)
     const freshSize = eligible.reduce((sum, c) => sum + c.size, 0)
 
+    // 所谓frozen的就是已经发送给了大模型的tool_result
+    // 所谓fresh的就是刚刚生成的tool_result
+    // frozen的只能用来计算大小，不能替换了，因为会影响到缓存
+    // 所以fresh里往往就是最新的tool_result，是还没有发送给大模型的tool_result
     const selected =
       frozenSize + freshSize > limit
         ? selectFreshToReplace(eligible, frozenSize, limit)
@@ -852,6 +857,7 @@ export async function enforceToolResultBudget(
 
   // Fresh: concurrent persist for all selected candidates across all
   // messages. In practice toPersist comes from a single message per turn.
+  // buildReplacement会负责生成预览内容
   const freshReplacements = await Promise.all(
     toPersist.map(async c => [c, await buildReplacement(c)] as const),
   )

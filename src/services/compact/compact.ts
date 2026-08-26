@@ -410,6 +410,8 @@ export async function compactConversation(
 
     // Execute PreCompact hooks
     context.setSDKStatus?.('compacting')
+
+    // 执行PreCompactHooks
     const hookResult = await executePreCompactHooks(
       {
         trigger: isAutoCompact ? 'auto' : 'manual',
@@ -436,7 +438,8 @@ export async function compactConversation(
       'tengu_compact_cache_prefix',
       true,
     )
-
+    
+    // 获取压缩提示词
     const compactPrompt = getCompactPrompt(customInstructions)
     const summaryRequest = createUserMessage({
       content: compactPrompt,
@@ -447,7 +450,9 @@ export async function compactConversation(
     let summaryResponse: AssistantMessage
     let summary: string | null
     let ptlAttempts = 0
+    
     for (;;) {
+      // 会fork一个agent进行总结
       summaryResponse = await streamCompactSummary({
         messages: messagesToSummarize,
         summaryRequest,
@@ -457,8 +462,13 @@ export async function compactConversation(
         cacheSafeParams: retryCacheSafeParams,
       })
       summary = getAssistantMessageText(summaryResponse)
+      
+      // 如果没有出现PTL
       if (!summary?.startsWith(PROMPT_TOO_LONG_ERROR_MESSAGE)) break
 
+    
+      // 如果出现了PTL，那就丢掉最老的消息组（一组消息就是从提问到最终答案，包含中间执行的工具和工具结果）
+      // 每次丢一组，然后重试再去压缩一次，如果还是PTL，那就再丢一组，重试3次，不行就throw new Error(ERROR_MESSAGE_PROMPT_TOO_LONG)
       // CC-1180: compact request itself hit prompt-too-long. Truncate the
       // oldest API-round groups and retry rather than leaving the user stuck.
       ptlAttempts++
@@ -1185,6 +1195,7 @@ async function streamCompactSummary({
         // creating a thinking config mismatch that invalidates the cache.
         // The streaming fallback path (below) can safely set maxOutputTokensOverride
         // since it doesn't share cache with the main thread.
+        // 新开一个Agent
         const result = await runForkedAgent({
           promptMessages: [summaryRequest],
           cacheSafeParams,

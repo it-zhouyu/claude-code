@@ -112,6 +112,9 @@ const result = await Bun.build({
   naming: '[dir]/[name].js',
   minify: true,
   sourcemap: 'none',
+  // HISTORY_SNIP 已移除：其实现文件（snipCompact.js/snipProjection.js）在泄漏包里是
+  // __devkit_debug_stub__ 空壳（仅 default 导出），具名解构会得到 undefined，
+  // 开着这个 feature 只会让相关代码路径运行时崩溃。
   features: ['BUDDY'], // 开启 buddy（自包含，不依赖私有包）
   define: {
     'process.env.USER_TYPE': JSON.stringify('external'),

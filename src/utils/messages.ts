@@ -4535,6 +4535,7 @@ export function createCompactBoundaryMessage(
   userContext?: string,
   messagesSummarized?: number,
 ): SystemCompactBoundaryMessage {
+  // 压缩边界，只会在本地消息历史里，不会发送给大模型API  .jsonl  （compact_boundary）
   return {
     type: 'system',
     subtype: 'compact_boundary',

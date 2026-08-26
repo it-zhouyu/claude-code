@@ -293,6 +293,11 @@ const extractSessionMemory = sequential(async function (
   // Initialize config from remote (lazy, only once)
   initSessionMemoryConfigIfNeeded()
 
+  // 抽取记忆的条件
+  // 上下文到过 1 万 token 才第一次启动
+  
+  // 距上次提取涨了 ≥5k token
+  // 距上次 ≥3 次工具调用 或 最后一轮有没有工具调用
   if (!shouldExtractMemory(messages)) {
     return
   }

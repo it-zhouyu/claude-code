@@ -20,6 +20,7 @@ import type {
 import type { TextBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { Stream } from '@anthropic-ai/sdk/streaming.mjs'
 import { randomUUID } from 'crypto'
+import { appendFileSync } from 'fs'
 import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
@@ -1773,6 +1774,7 @@ async function* queryModel(
   let isFastModeRequest = isFastMode // Keep separate state as it may change if falling back
   let isAdvisorInProgress = false
 
+  // 核心
   try {
     queryCheckpoint('query_client_creation_start')
     const generator = withRetry(
@@ -1819,6 +1821,7 @@ async function* queryModel(
         // BetaMessageStream calls partialParse() on every input_json_delta, which we don't need
         // since we handle tool input accumulation ourselves
         // biome-ignore lint/plugin: main conversation loop handles attribution separately
+        // 以流式模式调用 Messages API
         const result = await anthropic.beta.messages
           .create(
             { ...params, stream: true },
@@ -1938,6 +1941,7 @@ async function* queryModel(
       let stallCount = 0
 
       for await (const part of stream) {
+        appendFileSync('/tmp/claude-parts.log', `${JSON.stringify(part)}\n`)
         resetStreamIdleTimer()
         const now = Date.now()
 
@@ -2408,6 +2412,7 @@ async function* queryModel(
       // Instrumentation: if the watchdog had already fired and the for-await
       // threw (rather than exiting cleanly), record that the loop DID exit and
       // how long after the watchdog. Distinguishes true hangs from error exits.
+      // 看门狗触发了，记日志
       if (streamIdleAborted && streamWatchdogFiredAt !== null) {
         const exitDelayMs = Math.round(
           performance.now() - streamWatchdogFiredAt,
@@ -2435,6 +2440,7 @@ async function* queryModel(
         // Check if the abort signal was triggered by the user (ESC key)
         // If the signal is aborted, it's a user-initiated abort
         // If not, it's likely a timeout from the SDK
+        // 用户按了esc
         if (signal.aborted) {
           // This is a real user abort (ESC key was pressed)
           logForDebugging(
@@ -2457,6 +2463,7 @@ async function* queryModel(
             { level: 'error' },
           )
           // Throw a more specific error for timeout
+          // 看门狗触发，抛的这个错，上层会降级为非流式进行重试
           throw new APIConnectionTimeoutError({ message: 'Request timed out' })
         }
       }
@@ -2473,6 +2480,7 @@ async function* queryModel(
           false,
         )
 
+      // 禁止非流式降级
       if (disableFallback) {
         logForDebugging(
           `Error streaming (non-streaming fallback disabled): ${errorMessage(streamingError)}`,
@@ -2548,6 +2556,8 @@ async function* queryModel(
           ? 'watchdog'
           : 'other') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
+
+      // 执行非流式重发
       const result = yield* executeNonStreamingRequest(
         { model: options.model, source: options.querySource },
         {

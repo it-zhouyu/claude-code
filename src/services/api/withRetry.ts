@@ -176,6 +176,8 @@ export async function* withRetry<T>(
   ) => Promise<T>,
   options: RetryOptions,
 ): AsyncGenerator<SystemAPIErrorMessage, T> {
+
+  // 最大重试次数，默认为10
   const maxRetries = getMaxRetries(options)
   const retryContext: RetryContext = {
     model: options.model,
@@ -186,6 +188,7 @@ export async function* withRetry<T>(
   let consecutive529Errors = options.initialConsecutive529Errors ?? 0
   let lastError: unknown
   let persistentAttempt = 0
+
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (options.signal?.aborted) {
       throw new APIUserAbortError()
@@ -199,6 +202,7 @@ export async function* withRetry<T>(
 
     try {
       // Check for mock rate limits (used by /mock-limits command for Ant employees)
+      // 给内部员工模拟429错误用的，因为429错误
       if (process.env.USER_TYPE === 'ant') {
         const mockError = checkMockRateLimitError(
           retryContext.model,
@@ -215,6 +219,7 @@ export async function* withRetry<T>(
       // - Bedrock-specific auth errors (403 or CredentialsProviderError)
       // - Vertex-specific auth errors (credential refresh failures, 401)
       // - ECONNRESET/EPIPE: stale keep-alive socket; disable pooling and reconnect
+      // 判断是不是遇到了僵尸连接
       const isStaleConnection = isStaleConnectionError(lastError)
       if (
         isStaleConnection &&
@@ -228,7 +233,8 @@ export async function* withRetry<T>(
         )
         disableKeepAlive()
       }
-
+      
+      // 如果第一次调用或者OAuth Token过期、或者遇到了僵尸连接啥的就创建一个新的客户端
       if (
         client === null ||
         (lastError instanceof APIError && lastError.status === 401) ||
@@ -249,7 +255,9 @@ export async function* withRetry<T>(
         }
         client = await getClient()
       }
-
+      
+      // 执行具体的操作，得看传进来的operation到底会做什么？
+      // 比如claude.ts传进来的就是调用模型得到流式响应
       return await operation(client, attempt, retryContext)
     } catch (error) {
       lastError = error
@@ -264,6 +272,7 @@ export async function* withRetry<T>(
       // mode still active, so its `continue` never reaches the attempt clamp
       // and the for-loop terminates. Persistent sessions want the chunked
       // keep-alive path instead of fast-mode cache-preservation anyway.
+      // 快速模式遇到了429
       if (
         wasFastModeActive &&
         !isPersistentRetryEnabled() &&
@@ -272,15 +281,18 @@ export async function* withRetry<T>(
       ) {
         // If the 429 is specifically because extra usage (overage) is not
         // available, permanently disable fast mode with a specific message.
+        // 如果你的套餐不支持fast mode，但是你又用了，这时在 429 错误的响应头返回"超额计费被禁原因"，
         const overageReason = error.headers?.get(
           'anthropic-ratelimit-unified-overage-disabled-reason',
         )
+        // 关闭fast mode，然后重试
         if (overageReason !== null && overageReason !== undefined) {
           handleFastModeOverageRejection(overageReason)
           retryContext.fastMode = false
           continue
         }
 
+        // 仍然还是fast mode，只不过等一会再重试
         const retryAfterMs = getRetryAfterMs(error)
         if (retryAfterMs !== null && retryAfterMs < SHORT_RETRY_THRESHOLD_MS) {
           // Short retry-after: wait and retry with fast mode still active
@@ -288,6 +300,8 @@ export async function* withRetry<T>(
           await sleep(retryAfterMs, options.signal, { abortError })
           continue
         }
+
+        // 要等太久，就立即切换为普通模式进行重试，，30分钟后重新回到快速模式
         // Long or unknown retry-after: enter cooldown (switches to standard
         // speed model), with a minimum floor to avoid flip-flopping.
         const cooldownMs = Math.max(
@@ -307,6 +321,7 @@ export async function* withRetry<T>(
       // Fast mode fallback: if the API rejects the fast mode parameter
       // (e.g., org doesn't have fast mode enabled), permanently disable fast
       // mode and retry at standard speed.
+      // 是fast mode，但是服务端返回'Fast mode is not enabled'
       if (wasFastModeActive && isFastModeNotEnabledError(error)) {
         handleFastModeRejectedByAPI()
         retryContext.fastMode = false
@@ -315,6 +330,7 @@ export async function* withRetry<T>(
 
       // Non-foreground sources bail immediately on 529 — no retry amplification
       // during capacity cascades. User never sees these fail.
+      // 遇到529服务器过载了，如果是不重要的请求就直接不重试了
       if (is529Error(error) && !shouldRetry529(options.querySource)) {
         logEvent('tengu_api_529_background_dropped', {
           query_source:
@@ -324,6 +340,10 @@ export async function* withRetry<T>(
       }
 
       // Track consecutive 529 errors
+      // 连续遇到了三次529错误，并且配置了fallbackModel，那就throw new FallbackTriggeredError，让外层处理切换模型重新调用
+      // withRetry只负责重试，不负责切换模型
+      // 529 → 睡觉 → 重试又 529 → 睡觉 → 再 529，攒到 3 触发。如果中途某次重试成功了，整个函数直接 return，计数器跟着销毁，下轮对话从头数。
+      // 重试不仅仅是针对529，而这里只是处理连续三次529的请求，并不代表默认重试10次没有意义
       if (
         is529Error(error) &&
         // If FALLBACK_FOR_ALL_PRIMARY_MODELS is not set, fall through only if the primary model is a non-custom Opus model.
@@ -350,6 +370,7 @@ export async function* withRetry<T>(
             )
           }
 
+          // 如果没有fallbackModel，那就抛CannotRetryError
           if (
             process.env.USER_TYPE === 'external' &&
             !process.env.IS_SANDBOX &&
@@ -365,6 +386,8 @@ export async function* withRetry<T>(
       }
 
       // Only retry if the error indicates we should
+      // 如果超过了maxRetries，那就抛CannotRetryError，停止重试
+      // 所谓持久模式，就是一直重试，暂时没有公开的功能
       const persistent =
         isPersistentRetryEnabled() && isTransientCapacityError(error)
       if (attempt > maxRetries && !persistent) {
@@ -372,6 +395,7 @@ export async function* withRetry<T>(
       }
 
       // AWS/GCP errors aren't always APIError, but can be retried
+      // AWS/GCP是两个云厂商，如果重试过程中遇到了某些APIError，就直接不重试了
       const handledCloudAuthError =
         handleAwsCredentialError(error) || handleGcpCredentialError(error)
       if (
@@ -386,6 +410,12 @@ export async function* withRetry<T>(
       // The API now returns 'model_context_window_exceeded' stop_reason instead.
       // Keeping for backward compatibility.
       if (error instanceof APIError) {
+        // APIError包含'input length and `max_tokens` exceed context limit'
+        // 表示以后对话+max_tokens，超过了上下文窗口
+        // 假设模型上下文窗口 200000，你的对话已经占了 188059，而请求里预留的输出空间 max_tokens 是 20000。
+        // API 一算：188059 + 20000 > 200000，直接拒收
+        // 返回inputTokens, maxTokens, contextLimit
+        // 调小max_tokens，然后进行重试
         const overflowData = parseMaxTokensContextOverflowError(error)
         if (overflowData) {
           const { inputTokens, contextLimit } = overflowData
@@ -428,6 +458,7 @@ export async function* withRetry<T>(
 
       // For other errors, proceed with normal retry logic
       // Get retry-after header if available
+      // 重试之前的等待时间
       const retryAfter = getRetryAfter(error)
       let delayMs: number
       if (persistent && error instanceof APIError && error.status === 429) {
@@ -459,6 +490,7 @@ export async function* withRetry<T>(
           PERSISTENT_RESET_CAP_MS,
         )
       } else {
+        // 普通模式走这里，获取睡眠时间，越往后等待时间越久，有retryAfter就先retryAfter，否则指数退避
         delayMs = getRetryDelay(attempt, retryAfter)
       }
 
@@ -508,6 +540,7 @@ export async function* withRetry<T>(
         if (error instanceof APIError) {
           yield createSystemAPIErrorMessage(error, delayMs, attempt, maxRetries)
         }
+        // 开始睡眠，醒了之后就会自动进行循环，进行下次重试
         await sleep(delayMs, options.signal, { abortError })
       }
     }

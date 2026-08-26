@@ -372,6 +372,7 @@ async function* queryLoop(
       queryTracking,
     }
 
+    // 获取压缩边界之后的消息
     let messagesForQuery = [...getMessagesAfterCompactBoundary(messages)]
 
     let tracking = autoCompactTracking
@@ -383,6 +384,8 @@ async function* queryLoop(
     // Persist only for querySources that read records back on resume: agentId
     // routes to sidechain file (AgentTool resume) or session file (/resume).
     // Ephemeral runForkedAgent callers (agent_summary etc.) don't persist.
+    // 替换ToolResult为预览消息
+    // Read工具的ToolResult不会被替换
     const persistReplacements =
       querySource.startsWith('agent:') ||
       querySource.startsWith('repl_main_thread')
@@ -450,7 +453,7 @@ async function* queryLoop(
     if (feature('CONTEXT_COLLAPSE') && contextCollapse) {
       const collapseResult = await contextCollapse.applyCollapsesIfNeeded(
         messagesForQuery,
-        toolUseContext,
+        toolUseContext, 
         querySource,
       )
       messagesForQuery = collapseResult.messages
@@ -461,6 +464,7 @@ async function* queryLoop(
       appendSystemContext(systemPrompt, systemContext),
     )
 
+    // 自动压缩
     queryCheckpoint('query_autocompact_start')
     const { compactionResult, consecutiveFailures } = await deps.autocompact(
       messagesForQuery,
@@ -486,6 +490,10 @@ async function* queryLoop(
         compactionUsage,
       } = compactionResult
 
+      // logEvent() 就是埋点（遥测上报），程序里每发生一件值得记录的事，就“记一笔”发给 Anthropic 的后台数据库
+      // 它是给 Anthropic 看的，不是给用户看的
+      // 压缩前的消息数量、压缩后的消息数量
+      // 压缩前的token数量、压缩后的token数量
       logEvent('tengu_auto_compact_succeeded', {
         originalMessageCount: messages.length,
         compactedMessageCount:
@@ -536,6 +544,7 @@ async function* queryLoop(
         consecutiveFailures: 0,
       }
 
+      // 压缩之后的消息列表
       const postCompactMessages = buildPostCompactMessages(compactionResult)
 
       for (const message of postCompactMessages) {
@@ -928,6 +937,7 @@ async function* queryLoop(
             }
           }
         } catch (innerError) {
+          // 切换降级模型进行调用
           if (innerError instanceof FallbackTriggeredError && fallbackModel) {
             // Fallback was triggered - switch model and retry
             currentModel = fallbackModel
@@ -1034,6 +1044,7 @@ async function* queryLoop(
     }
 
     // Execute post-sampling hooks after model response is complete
+    // 执行PostSamplingHooks
     if (assistantMessages.length > 0) {
       void executePostSamplingHooks(
         [...messagesForQuery, ...assistantMessages],
@@ -1049,16 +1060,19 @@ async function* queryLoop(
     // When using streamingToolExecutor, we must consume getRemainingResults() so the
     // executor can generate synthetic tool_result blocks for queued/in-progress tools.
     // Without this, tool_use blocks would lack matching tool_result blocks.
+    // 检查是不是被中断了
     if (toolUseContext.abortController.signal.aborted) {
       if (streamingToolExecutor) {
         // Consume remaining results - executor generates synthetic tool_results for
         // aborted tools since it checks the abort signal in executeTool()
+        // 工具tool_use返回的时候被中断了，那就补上tool_result
         for await (const update of streamingToolExecutor.getRemainingResults()) {
           if (update.message) {
             yield update.message
           }
         }
       } else {
+        // 非stream，工具执行过程中被中断了，那就补上tool_result
         yield* yieldMissingToolResultBlocks(
           assistantMessages,
           'Interrupted by user',

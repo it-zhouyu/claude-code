@@ -364,8 +364,10 @@ export async function* withStreamingVCR(
   const buffer: (StreamEvent | AssistantMessage | SystemAPIErrorMessage)[] = []
 
   // Record messages (or fetch from cache)
+  // f()函数负责调用大模型，withVCR会把大模型返回的消息存下来，存成文件，下次测试时直接放录像，不再真的调 API
   const cachedBuffer = await withVCR(messages, async () => {
     for await (const message of f()) {
+      // 把大模型返回的消息存进数组
       buffer.push(message)
     }
     return buffer
