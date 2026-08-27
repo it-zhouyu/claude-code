@@ -344,7 +344,6 @@ export async function resolveHookPermissionDecision(
 
   // requiresInteraction为true，表示这个工具必须与真人交互，比如AskUserQuestionTool
   const requiresInteraction = tool.requiresUserInteraction?.()
-  // Claude Code有一套Prompt Suggestion（输入建议） 和 Speculation（投机/预执行）机制，会在后台猜你接下来的动作并执行，而在执行过程中，假如hook允许了某些命令那也是不行的，因为是后台执行不能轻易执行命令
   const requireCanUseTool = toolUseContext.requireCanUseTool
 
   // 在这之前已经执行了hook，hook如果允许工具执行，但是工具要求真人交互，那就必须走canUseTool
@@ -424,6 +423,7 @@ export async function resolveHookPermissionDecision(
     }
   }
 
+  // hook拒绝了那就直接拒绝了
   if (hookPermissionResult?.behavior === 'deny') {
     logForDebugging(`Hook denied tool use for ${tool.name}`)
     return { decision: hookPermissionResult, input }

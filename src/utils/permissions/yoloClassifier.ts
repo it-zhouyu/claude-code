@@ -1024,7 +1024,7 @@ export async function classifyYoloAction(
   
   // '' = "no security relevance" (Tool.toAutoClassifierInput contract). Without
   // this guard the empty action block + cache_control below hits an API 400.
-  // 只要为''，这是一种阅读，表示工具可以执行，shouldBlock: false表示通过
+  // 只要为''，这是一种约定，表示工具可以执行，shouldBlock: false表示通过
   if (actionCompact === '') {
     return {
       shouldBlock: false,
@@ -1033,9 +1033,9 @@ export async function classifyYoloAction(
     }
   }
 
+  // 系统提示词
   const systemPrompt = await buildYoloSystemPrompt(context)
 
-  // 
   const transcriptEntries = buildTranscriptEntries(messages)
   const claudeMdMessage = buildClaudeMdMessage()
   const prefixMessages: Anthropic.MessageParam[] = claudeMdMessage
@@ -1047,6 +1047,7 @@ export async function classifyYoloAction(
   const userContentBlocks: Anthropic.TextBlockParam[] = []
   for (const entry of transcriptEntries) {
     for (const block of entry.content) {
+      // 只保留tool_use和user
       const serialized = toCompactBlock(block, entry.role, lookup)
       if (serialized === '') continue
       switch (entry.role) {
@@ -1164,6 +1165,7 @@ export async function classifyYoloAction(
       signal,
       querySource: 'auto_mode' as const,
     }
+    // 调用模型
     const result = await sideQuery(sideQueryOpts)
     void maybeDumpAutoMode(sideQueryOpts, result, start)
     setLastClassifierRequests([sideQueryOpts])

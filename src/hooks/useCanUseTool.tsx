@@ -47,7 +47,7 @@ function useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext) {
       // hook 已经明确说"要询问用户"，就没必要再重新跑一遍规则+模式匹配；直接用 hook 的 ask 进入弹窗流程，并且弹窗展示 hook 提供的消息
       // 否则就执行hasPermissionsToUseTool进入规则匹配和模式适配
       const decisionPromise = forceDecision !== undefined 
-        ? Promise.resolve(forceDecision)  // 有强制决策（比如 hook 返回 ask）直接用
+        ? Promise.resolve(forceDecision)  // 有强制决策（比如 hook 返回 ask,allow）直接用
         : hasPermissionsToUseTool(tool, input, toolUseContext, assistantMessage, toolUseID); // 否则跑"规则匹配 + 模式匹配"
       
       // 根据当前的决定分三种情况  

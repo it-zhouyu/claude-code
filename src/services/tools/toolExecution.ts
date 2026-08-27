@@ -349,7 +349,6 @@ export async function* runToolUse(
   // If not found, check if it's a deprecated tool being called by alias
   // (e.g., old transcripts calling "KillShell" which is now an alias for "TaskStop")
   // Only fall back for tools where the name matches an alias, not the primary name
-  // 找默认工具
   if (!tool) {
     const fallbackTool = findToolByName(getAllBaseTools(), toolName)
     // Only use fallback if the tool was found via alias (deprecated name)
@@ -637,6 +636,7 @@ async function checkPermissionsAndCallTool(
   // Validate input types with zod (surprisingly, the model is not great at generating valid input)
   // 用zod对input进行类型校验，翻译：令人意外的是，模型并不擅长生成合法的输入
   // parse校验失败会抛异常，safeParse不抛，而是返回 {success: false, error}
+  // 类型校验：必填的字段有没有值，是不是传了不存在的字段，数值能不能正常的做类型转换
   const parsedInput = tool.inputSchema.safeParse(input)
 
   // 如果类型校验不成功
@@ -986,7 +986,7 @@ async function checkPermissionsAndCallTool(
     assistantMessage,
     toolUseID,
   )
-  // 拿到决策结果，allow / deny / ask
+  // 拿到决策结果，allow / deny
   const permissionDecision = resolved.decision
   processedInput = resolved.input
   // 决策花了多久
@@ -1013,7 +1013,7 @@ async function checkPermissionsAndCallTool(
   // permission path didn't already log it (headless mode bypasses permission
   // logging, so we need to emit both the generic event and the code-edit
   // counter here)
-  // 如果决策不是ask，那就是allow或deny，允许或拒绝，那就记录一下，没什么特别的
+  // 正常来说代码到这不会出现ask了，如果决策不是ask，那就是allow或deny，允许或拒绝，那就记录一下，没什么特别的
   if (
     permissionDecision.behavior !== 'ask' &&
     !toolUseContext.toolDecisions?.has(toolUseID)
@@ -1058,7 +1058,7 @@ async function checkPermissionsAndCallTool(
     })
   }
 
-  // deny或ask
+  // deny，代码执行到这不会有ask了
   if (permissionDecision.behavior !== 'allow') {
     logForDebugging(`${tool.name} tool permission denied`)
     const decisionInfo = toolUseContext.toolDecisions?.get(toolUseID)
